@@ -52,6 +52,22 @@ src/bot-api/   # клиент Telegram Bot API (fetch + прокси), типы 
 (`extends`, эмит без `*.test.ts`) — для `pnpm build`. Тесты — рядом с исходниками (`*.test.ts`).
 Сборка: `pnpm build` → `dist/gateway/index.js`, `dist/mcp/index.js`.
 
+## Релиз и публикация
+
+Версия — единый источник истины **git-тег** `vX.Y.Z`. Перед тегом
+`scripts/version-bump.sh X.Y.Z` синхронизирует `package.json`, `addon.json` и
+`charts/synth-gateway-telegram/Chart.yaml` (`version` + `appVersion`). CI-пайплайн
+`.gitverse/workflows/release.yaml` (триггер — тег `v*` либо ручной
+`workflow_dispatch` с `dry_run`) прогоняет проверки (build/typecheck/lint/test) и
+публикует: Docker `gitverse.ru/itphx/synth-gateway-telegram:<version>` (`:latest`,
+kaniko), Helm-чарт в реестр `https://gitverse.ru/api/packages/itphx/helm`
+(нативный Helm, не OCI), GitVerse Release.
+
+Публикацию запускает человек (push тега / ручной запуск) — на обычные push/PR
+workflow ничего не публикует. Токен — секрет `GV_TOKEN` (префикс `GITVERSE_`
+запрещён). Сложный bash вынесен в `scripts/` (`${...}` в inline-bash ломает
+Go-шаблон GitVerse CI).
+
 ## Куда смотреть (триггеры)
 
 | Тема | Файл |
@@ -65,6 +81,7 @@ src/bot-api/   # клиент Telegram Bot API (fetch + прокси), типы 
 | Явные команды бота | `src/gateway/commands.ts`, `command-handler.ts` |
 | Обратная доставка ответов (SSE) | `src/gateway/watcher.ts` |
 | Публикация событий (API v2) | `src/gateway/ingest.ts` |
+| Релиз / публикация (Docker/Helm) | `.gitverse/workflows/release.yaml`, `scripts/`, `docs/deployment.md` |
 | Таймауты / прокси / клиент Bot API | `src/bot-api/transport.ts`, `src/bot-api/client.ts` |
 | MCP-тулы (`tg_*`) | `src/mcp/server.ts`, `src/mcp/tools.ts` |
 | Скилл агента | `skills/gateway-telegram/SKILL.md` |

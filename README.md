@@ -70,7 +70,8 @@ synth-gateway-telegram/
 ├── examples/        # примеры Secret и tenants.json
 ├── docs/            # configuration.md · deployment.md · addon.md
 ├── skills/gateway-telegram/SKILL.md  # скилл AD-046 для агента
-└── .gitverse/workflows/ci.yaml       # CI
+├── scripts/         # release-хелперы (docker-auth, publish-chart, version-bump, release-notes)
+└── .gitverse/workflows/  # ci.yaml (push/PR) · release.yaml (Docker + Helm + Release по тегу v*)
 ```
 
 ## Команды
@@ -88,6 +89,10 @@ synth-gateway-telegram/
 - Docker / compose / Kubernetes / Helm — [docs/deployment.md](docs/deployment.md).
 - Публикуемый Helm-чарт — `charts/synth-gateway-telegram`; managed-развёртывание
   внутренних инстансов живёт в закрытом репозитории деплоя окружения.
+- Опубликованные артефакты (по тегу `v*`): образ
+  `gitverse.ru/itphx/synth-gateway-telegram:<version>`, чарт
+  `synth/synth-gateway-telegram` из реестра
+  `https://gitverse.ru/api/packages/itphx/helm` — см. [docs/deployment.md](docs/deployment.md).
 
 ## Лицензия
 

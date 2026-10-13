@@ -1,0 +1,154 @@
+name: Release
+
+# Релиз add-on'а synth-gateway-telegram: проверки → Docker-образ → Helm-чарт → GitVerse Release.
+#
+# Триггеры:
+#   - push тега vX.Y.Z (или vX.Y.Z-pre): версия берётся из тега;
+#   - workflow_dispatch: версия берётся из package.json, dry_run пропускает публикации.
+#
+# Публикацию запускает человек (push тега либо ручной запуск) — workflow ничего не делает
+# при обычных push/PR (это ci.yaml). Особенности GitVerse CI: actions/setup-node не
+# используется; сложный bash вынесен в scripts/ (${...} в inline-bash ломает Go-шаблон).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
+        description: 'Проверка без публикации (dry-run)'
+      pre_release:
+        type: boolean
+        default: false
+        description: 'Предварительный релиз (pre-release)'
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+jobs:
+  # --- Определение версии релиза (единый источник для downstream-джоб) ---
+  resolve-version:
+    name: Версия
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Определить версию
+        id: version
+        run: |
+          if [ "${{ gitverse.event_name }}" = "workflow_dispatch" ]; then
+            VERSION=$(node -e "console.log(require('./package.json').version)")
+            echo "workflow_dispatch: версия из package.json"
+          else
+            VERSION=$(echo "${{ gitverse.ref }}" | sed 's|refs/tags/v||')
+            echo "push тега: версия из тега"
+          fi
+          echo "Версия релиза: $VERSION"
+          echo "version=$VERSION" >> "$GITVERSE_OUTPUT"
+
+  # --- Проверки (build/typecheck/lint/test) ---
+  checks:
+    name: Проверки
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # В GitVerse используется предустановленный Node.js 22; actions/setup-node не применять.
+      - name: Установка pnpm
+        run: npm install -g pnpm@latest
+
+      - name: Установка зависимостей
+        run: pnpm install --frozen-lockfile
+
+      - name: Сборка
+        run: pnpm build
+
+      - name: TypeScript (typecheck)
+        run: pnpm typecheck
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: Тесты
+        run: pnpm test
+
+  # --- Docker-образ (kaniko; механизм как в основном репозитории synth) ---
+  # Публичный реестр gitverse.ru (НЕ registry.gitverse.ru); образы тянутся анонимно.
+  docker:
+    name: Docker образ
+    needs: [checks, resolve-version]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Авторизация для Docker Registry
+        env:
+          DOCKER_CONFIG: ${{ gitverse.workspace }}/.docker
+          GV_TOKEN: ${{ secrets.GV_TOKEN }}
+        run: bash scripts/docker-auth.sh
+
+      - name: Сборка и публикация образа (kaniko)
+        uses: docker://gcr.io/kaniko-project/executor:v1.24.0
+        env:
+          DOCKER_CONFIG: ${{ gitverse.workspace }}/.docker
+        with:
+          args: >-
+            --context=dir://${{ gitverse.workspace }}
+            --dockerfile=docker/Dockerfile
+            --destination=gitverse.ru/itphx/synth-gateway-telegram:${{ needs.resolve-version.outputs.version }}
+            --destination=gitverse.ru/itphx/synth-gateway-telegram:latest
+            --snapshot-mode=redo
+            --push-retry=3
+            --verbosity=info
+
+  # --- Helm-чарт (нативный Helm-реестр GitVerse, не OCI) ---
+  helm:
+    name: Helm-чарт
+    needs: [checks, resolve-version]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка Helm
+        run: |
+          curl -fsSL -o helm.tgz https://get.helm.sh/helm-v3.20.1-linux-amd64.tar.gz
+          tar -xzf helm.tgz
+
+      - name: Lint + упаковка + публикация чарта
+        env:
+          GV_TOKEN: ${{ secrets.GV_TOKEN }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: bash scripts/publish-chart.sh
+
+  # --- GitVerse Release ---
+  release:
+    name: GitVerse Release
+    needs: [docker, helm, resolve-version]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Собрать тело релиза
+        id: release_body
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: bash scripts/release-notes.sh
+
+      - name: Создать релиз
+        uses: actions/create-release@v1
+        with:
+          api_key: ${{ secrets.GV_TOKEN }}
+          title: Release v${{ needs.resolve-version.outputs.version }}
+          body: ${{ steps.release_body.outputs.body }}
+          pre_release: ${{ inputs.pre_release || false }}

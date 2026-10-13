@@ -4,10 +4,36 @@
 > Переменные и секреты — [configuration.md](configuration.md); границы add-on'а —
 > [addon.md](addon.md).
 
+## Публикуемые артефакты
+
+Релиз публикуется CI-пайплайном (`.gitverse/workflows/release.yaml`) по тегу
+`vX.Y.Z` (или через ручной запуск `workflow_dispatch`):
+
+| Артефакт | Координаты |
+|---|---|
+| Docker-образ | `gitverse.ru/itphx/synth-gateway-telegram:<version>` (и `:latest`) |
+| Helm-чарт | Helm-реестр `https://gitverse.ru/api/packages/itphx/helm`, чарт `synth-gateway-telegram` версии `<version>` |
+
+Реестры публичные: `docker pull` и `helm repo add` аутентификации не требуют.
+
+Установка из опубликованного реестра:
+
+```bash
+helm repo add synth https://gitverse.ru/api/packages/itphx/helm
+helm repo update
+helm install synth-gateway-telegram synth/synth-gateway-telegram \
+  --version <version> \
+  --namespace synth --create-namespace \
+  --set existingSecret=synth-gateway-telegram-secrets
+
+docker pull gitverse.ru/itphx/synth-gateway-telegram:<version>
+```
+
 ## Docker
 
-Образ собирается из одного пакета (multi-stage: сборка → тонкий runtime с
-prod-зависимостями); entrypoint — `node dist/gateway/index.js`.
+Локальная сборка (опубликованный образ — `gitverse.ru/itphx/synth-gateway-telegram`,
+см. «Публикуемые артефакты»). Образ собирается из одного пакета (multi-stage:
+сборка → тонкий runtime с prod-зависимостями); entrypoint — `node dist/gateway/index.js`.
 
 ```bash
 docker build -f docker/Dockerfile -t synth-gateway-telegram:latest .
@@ -36,10 +62,13 @@ docker compose up --build
 
 ## Kubernetes / Helm
 
-Публикуемый чарт — `charts/synth-gateway-telegram` в этом репозитории. Образ
+Публикуемый чарт — `charts/synth-gateway-telegram` в этом репозитории (установка
+из реестра — раздел «Публикуемые артефакты» выше). Образ
 `gitverse.ru/itphx/synth-gateway-telegram` тянется анонимно; секреты — через
 существующий Secret (`existingSecret`), состояние — PVC
 (`persistence.enabled=true`).
+
+Локальная проверка и установка из исходников (до/без публикации):
 
 ```bash
 helm lint charts/synth-gateway-telegram
