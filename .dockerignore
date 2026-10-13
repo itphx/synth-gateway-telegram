@@ -1,0 +1,29 @@
+# Контекст сборки Docker-образа (см. docker/Dockerfile).
+# Внутрь образа попадают только манифесты и исходники — без секретов, данных и git.
+
+.git
+.gitverse
+node_modules
+dist
+tmp
+data
+secrets
+certs
+charts
+docs
+examples
+skills
+*.log
+*.tsbuildinfo
+**/*.test.ts
+docker-compose.yml
+.dockerignore
+.gitignore
+.editorconfig
+.prettierrc
+eslint.config.js
+vitest.config.ts
+README.md
+AGENTS.md
+LICENSE
+addon.json

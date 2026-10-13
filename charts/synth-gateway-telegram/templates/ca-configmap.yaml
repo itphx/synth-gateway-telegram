@@ -1,0 +1,15 @@
+{{- if and .Values.ca.enabled .Values.ca.caCert (not .Values.ca.existingConfigMap) }}
+# ConfigMap с внутренним CA (публичный сертификат, НЕ секрет) — для доверия
+# внешнему https-адресу Synth (synthUrl тенанта через ingress/домен).
+# Рендерится только когда ca.enabled=true и задан ca.caCert (in-line PEM);
+# при ca.existingConfigMap чарт монтирует существующий ConfigMap и этот не создаёт.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "synth-gateway-telegram.fullname" . }}-ca
+  labels:
+    {{- include "synth-gateway-telegram.labels" . | nindent 4 }}
+data:
+  {{ .Values.ca.configMapKey }}: |
+    {{- .Values.ca.caCert | nindent 4 }}
+{{- end }}

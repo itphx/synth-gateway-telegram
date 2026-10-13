@@ -1,0 +1,180 @@
+# --- Дефолтные значения для чарта synth-gateway-telegram ---
+# Telegram-шлюз Synth: поллинг Telegram → внешние события API v2 (AD-089).
+# Переопределяются при установке (--set, values-файл) или через Fleet.
+
+# Namespace развёртывания. Helm деплоит в namespace релиза; это значение
+# используется Fleet как targetNamespace и документация для helm template.
+namespace: synth
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Поды — один Deployment.
+# ─────────────────────────────────────────────────────────────────────────────
+replicaCount: 1
+
+# Стратегия обновления Deployment. Шлюз — singleton (long-polling `getUpdates`:
+# второй поллер получает `409 Conflict`), поэтому rolling-обновление недопустимо —
+# старый и новый поды какое-то время жили бы одновременно. `Recreate` гарантирует,
+# что старый под завершён до старта нового (возможен короткий простой).
+# Переопределение: `--set strategy.type=RollingUpdate` (осознанно).
+strategy:
+  type: Recreate
+
+image:
+  repository: gitverse.ru/itphx/synth-gateway-telegram
+  tag: latest
+  pullPolicy: Always
+
+# Образ публикуется в публичный реестр (gitverse.ru) и тянется анонимно.
+# Задайте свои imagePullSecrets при необходимости (для приватного реестра):
+imagePullSecrets: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Service — ClusterIP с портом health-сервера.
+# ─────────────────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 7100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Env-переменные приложения (НЕ секреты). Секреты — через existingSecret.
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  GATEWAY_HOST: "0.0.0.0"
+  GATEWAY_PORT: "7100"
+  GATEWAY_DATA_DIR: "/var/lib/synth-gateway/data"
+  SYNTH_URL: "http://synth-backend:5000/api/v2"
+  GATEWAY_PARSE_MODE: "plain"
+  # Политика отправителя, не сопоставленного с учётной записью Synth
+  # (`register` — дефолт: публиковать; `hint` — публиковать и подсказать;
+  # `reject` — не публиковать, ответить отказом). «Известность» резолвит ядро.
+  GATEWAY_UNKNOWN_ACTION: "register"
+
+# Имя существующего Secret (kubectl/SealedSecret) с секретами сервиса —
+# подключается как envFrom. Ожидаемые ключи Secret: TELEGRAM_BOT_TOKEN,
+# SYNTH_SERVICE_KEY (AD-052, приоритетный scoped service-key `synth_svc_…`),
+# SYNTH_API_KEY (legacy-fallback), GATEWAY_ALLOWLIST, TELEGRAM_PROXY_URL,
+# SYNTH_OIDC_CLIENT_SECRET (managed: OIDC).
+# Пусто — секреты не монтируются. Значения секретов в git не хранить.
+#
+# Прокси Bot API приходит ТОЛЬКО из Secret (ключ TELEGRAM_PROXY_URL).
+# В `env:` его добавлять нельзя: значение из `env` перекрыло бы envFrom
+# (Secret), а пустое — отключило бы прокси. Файловый fallback
+# (`secrets/telegram_proxy_url`) в контейнере недоступен — каталог `secrets`
+# в K3s не монтируется.
+#
+# Полный справочник переменных и приоритетов — docs/configuration.md.
+existingSecret: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Доверие внутреннему CA — для тенантов с ВНЕШНИМ https-адресом Synth
+# (`synthUrl` через ingress/домен внешнего https-инстанса), подписанным
+# внутренним CA окружения. Node/undici (`fetch`) проверяет TLS и без CA
+# отклоняет самоподписанную цепочку (SELF_SIGNED_CERT_IN_CHAIN /
+# UNABLE_TO_VERIFY_LEAF_SIGNATURE). Для in-cluster http-тенанта TLS не нужен.
+#
+# CA — публичный сертификат (НЕ секрет). Способ задания (приоритет):
+#   1) existingConfigMap — имя существующего ConfigMap с ключом configMapKey;
+#   2) caCert            — PEM-строка (root+intermediate, root первым) →
+#                          чарт создаёт ConfigMap <fullname>-ca.
+# Файл монтируется read-only, путь выставляется в env NODE_EXTRA_CA_CERTS.
+# enabled=false (дефолт) — поведение прежнее: CA не монтируется.
+# ─────────────────────────────────────────────────────────────────────────────
+ca:
+  enabled: false
+  # PEM внутреннего CA (root+intermediate, root первым). Публичный — не секрет.
+  caCert: ""
+  # Имя существующего ConfigMap (приоритетнее caCert). Пусто → из caCert.
+  existingConfigMap: ""
+  # Ключ ConfigMap с PEM (для существующего ConfigMap).
+  configMapKey: ca.crt
+  # Путь монтирования файла в контейнер (= значение NODE_EXTRA_CA_CERTS).
+  mountPath: /etc/ssl/certs/ca.crt
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Мультитенантность (несколько ботов → несколько сред Synth): монтирование
+# `tenants.json` в контейнер.
+#
+# enabled=true — ключ `TENANTS_JSON` из Secret монтируется как файл по
+# `mountPath` и выставляется env `GATEWAY_TENANTS_FILE`; шлюз обслуживает N
+# ботов из файла. Single-tenant env (`TELEGRAM_BOT_TOKEN`, `SYNTH_URL`, …)
+# продолжает работать как fallback-дефолт для тенантов без своих полей и как
+# единственный режим, если enabled=false (поведение прежнее).
+#
+# Secret создаётся вне чарта (kubectl/SealedSecret) и содержит ключ `TENANTS_JSON`
+# с JSON-документом `{ "tenants": [ … ] }`. Секреты (botToken/serviceKey) —
+# вне git. Пусто и `secretName`, и `existingSecret` при enabled=true — ошибка.
+# ─────────────────────────────────────────────────────────────────────────────
+tenantsFile:
+  enabled: false
+  # Имя Secret с ключом `TENANTS_JSON`. Пусто → берётся `existingSecret`.
+  secretName: ""
+  # Ключ Secret, содержащий весь документ tenants.json.
+  secretKey: TENANTS_JSON
+  # Путь монтирования файла в контейнер (= значение GATEWAY_TENANTS_FILE).
+  mountPath: /etc/gateway/tenants.json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Аутентификация Synth API по OIDC client-credentials (managed: backend под
+# OIDC/Keycloak, статический SYNTH_API_KEY не принимается). Несекретные поля
+# (tokenUrl/discoveryUrl/clientId/scope) можно задать здесь; client_secret —
+# ТОЛЬКО через existingSecret (ключ SYNTH_OIDC_CLIENT_SECRET).
+# Приоритет: SYNTH_SERVICE_KEY (scoped service-key, AD-052) > OIDC > SYNTH_API_KEY.
+#
+# managed-инстанс: OIDC issuer <oidc-issuer>,
+# клиент `synth-gateway` (confidential, service account, роли user/lead);
+# token URL <issuer>/protocol/openid-connect/token. client_secret лежит в
+# SealedSecret `synth-secrets` (см. репозиторий деплоя окружения) — сюда не прописывать.
+# Пусто (enabled=false) → standalone/dev: аутентификация по service-key/SYNTH_API_KEY.
+# ─────────────────────────────────────────────────────────────────────────────
+oidc:
+  enabled: false
+  tokenUrl: ""
+  discoveryUrl: ""
+  clientId: ""
+  scope: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Хранилище JSON-состояния (offset/дедуп/привязки чатов). Обязательно для
+# шлюза: без PVC смещение long-polling теряется при рестарте пода.
+# ─────────────────────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  mountPath: /var/lib/synth-gateway/data
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ресурсы и безопасность контейнера.
+# ─────────────────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ingress — по умолчанию выключен (наружу нужен только health, обычно через
+# Service в кластере; Telegram-шлюз работает исходящими запросами).
+# ─────────────────────────────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: traefik
+  hosts: []
+  tls: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

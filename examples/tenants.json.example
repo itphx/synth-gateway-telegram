@@ -1,0 +1,19 @@
+{
+  "tenants": [
+    {
+      "id": "dev",
+      "botToken": "123456:REPLACE_ME",
+      "synthUrl": "http://127.0.0.1:5000/api/v2",
+      "serviceKey": "synth_svc_REPLACE_ME",
+      "allowlist": "123456789:ADMIN"
+    },
+    {
+      "id": "prod",
+      "botToken": "123456:REPLACE_ME",
+      "synthUrl": "https://synth.example.com/api/v2",
+      "serviceKey": "synth_svc_REPLACE_ME",
+      "proxyUrl": "http://proxy.example.com:3129",
+      "parseMode": "html"
+    }
+  ]
+}

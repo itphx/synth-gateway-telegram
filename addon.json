@@ -1,0 +1,8 @@
+{
+  "name": "@itphx/synth-gateway-telegram",
+  "version": "0.1.0",
+  "kind": "addon",
+  "host": "^0.9.0",
+  "contracts": { "apiV2": "^2", "events": "^1", "mcp": "^1" },
+  "description": "Telegram-шлюз: мост между Telegram-ботом и платформой внешних событий Synth"
+}

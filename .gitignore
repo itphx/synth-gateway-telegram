@@ -1,0 +1,25 @@
+# Зависимости
+node_modules/
+
+# Сборка
+dist/
+*.tsbuildinfo
+
+# Runtime-данные (JSON-хранилище add-on'а) и временные файлы
+data/
+tmp/
+
+# Секреты — вне git (токен бота, ключи Synth, tenants.json); см. docs/configuration.md
+secrets/
+
+# Внутренний CA не хранится в add-on; положите свой локально (certs/ca.crt)
+certs/
+
+# Тесты и логи
+coverage/
+*.log
+
+# Окружение
+.env
+.env.*
+!.env.example

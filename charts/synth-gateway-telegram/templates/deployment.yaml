@@ -1,0 +1,163 @@
+# Deployment сервиса-надстройки: один контейнер, HTTP-порт из values, env из values.
+# Секреты подключаются через existingSecret (envFrom), а не значениями в чарте.
+{{- if and .Values.tenantsFile.enabled (not (or .Values.tenantsFile.secretName .Values.existingSecret)) }}
+{{- fail "tenantsFile.enabled=true: задайте tenantsFile.secretName или existingSecret (Secret с ключом TENANTS_JSON)" }}
+{{- end }}
+{{- if and .Values.ca.enabled (not (or .Values.ca.caCert .Values.ca.existingConfigMap)) }}
+{{- fail "ca.enabled=true: задайте ca.caCert (PEM) или ca.existingConfigMap" }}
+{{- end }}
+{{- $tenantsSecret := .Values.tenantsFile.secretName | default .Values.existingSecret }}
+{{- $caConfigMap := .Values.ca.existingConfigMap | default (printf "%s-ca" (include "synth-gateway-telegram.fullname" .)) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "synth-gateway-telegram.fullname" . }}
+  labels:
+    {{- include "synth-gateway-telegram.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Стратегия обновления: по умолчанию Recreate (шлюз — singleton, см. values.yaml).
+  {{- with .Values.strategy }}
+  strategy:
+    type: {{ .type | default "Recreate" | quote }}
+  {{- end }}
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      {{- include "synth-gateway-telegram.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "synth-gateway-telegram.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if .Values.tenantsFile.enabled }}
+            # Мультитенантность: путь к смонтированному tenants.json.
+            - name: GATEWAY_TENANTS_FILE
+              value: {{ .Values.tenantsFile.mountPath | quote }}
+            {{- end }}
+            {{- if .Values.ca.enabled }}
+            # Внутренний CA: доверие внешнему https-инстансу Synth (Node/undici).
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ .Values.ca.mountPath | quote }}
+            {{- end }}
+            {{- with .Values.oidc }}
+            {{- if .enabled }}
+            {{- if .tokenUrl }}
+            - name: SYNTH_OIDC_TOKEN_URL
+              value: {{ .tokenUrl | quote }}
+            {{- end }}
+            {{- if .discoveryUrl }}
+            - name: SYNTH_OIDC_DISCOVERY_URL
+              value: {{ .discoveryUrl | quote }}
+            {{- end }}
+            {{- if .clientId }}
+            - name: SYNTH_OIDC_CLIENT_ID
+              value: {{ .clientId | quote }}
+            {{- end }}
+            {{- if .scope }}
+            - name: SYNTH_OIDC_SCOPE
+              value: {{ .scope | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          {{- if .Values.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          {{- end }}
+          {{- if or .Values.persistence.enabled .Values.tenantsFile.enabled .Values.ca.enabled }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+            {{- if .Values.tenantsFile.enabled }}
+            # tenants.json (ключ TENANTS_JSON Secret) — read-only файл.
+            - name: tenants
+              mountPath: {{ dir .Values.tenantsFile.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.ca.enabled }}
+            # Внутренний CA — read-only файл для NODE_EXTRA_CA_CERTS.
+            - name: ca
+              mountPath: {{ .Values.ca.mountPath }}
+              subPath: {{ .Values.ca.configMapKey }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if or .Values.persistence.enabled .Values.tenantsFile.enabled .Values.ca.enabled }}
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "synth-gateway-telegram.fullname" . }}
+        {{- end }}
+        {{- if .Values.ca.enabled }}
+        # Внутренний CA: существующий ConfigMap либо созданный из ca.caCert.
+        - name: ca
+          configMap:
+            name: {{ $caConfigMap }}
+        {{- end }}
+        {{- if .Values.tenantsFile.enabled }}
+        # tenants.json из Secret (ключ TENANTS_JSON → файл tenants.json).
+        - name: tenants
+          secret:
+            secretName: {{ $tenantsSecret }}
+            items:
+              - key: {{ .Values.tenantsFile.secretKey }}
+                path: {{ base .Values.tenantsFile.mountPath }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

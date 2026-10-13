@@ -1,0 +1,16 @@
+# Service сервиса-надстройки: ClusterIP c портом сервиса.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "synth-gateway-telegram.fullname" . }}
+  labels:
+    {{- include "synth-gateway-telegram.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "synth-gateway-telegram.selectorLabels" . | nindent 4 }}

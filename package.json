@@ -1,0 +1,43 @@
+{
+  "name": "@itphx/synth-gateway-telegram",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Telegram-шлюз: внешний сервис-надстройка (add-on) Synth, мост между Telegram-ботом и платформой внешних событий",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "synth-gateway-telegram": "./dist/gateway/index.js",
+    "synth-gateway-tg": "./dist/mcp/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "start": "node dist/gateway/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@grammyjs/types": "^5.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "hono": "^4.9.0",
+    "https-proxy-agent": "^9.1.0",
+    "socks-proxy-agent": "^10.1.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.60.0",
+    "vitest": "^4.1.7"
+  }
+}

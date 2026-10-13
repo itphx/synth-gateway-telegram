@@ -1,0 +1,45 @@
+Чарт {{ .Chart.Name }} {{ .Chart.Version }} установлен как релиз {{ .Release.Name }}
+в namespace {{ .Release.Namespace }}.
+
+Сервис доступен внутри кластера:
+
+  http://{{ include "synth-gateway-telegram.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Проверка готовности (без аутентификации):
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "synth-gateway-telegram.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s http://127.0.0.1:{{ .Values.service.port }}/health
+
+Секреты:
+
+{{- if .Values.existingSecret }}
+  Используется существующий Secret: {{ .Values.existingSecret }} (envFrom).
+{{- else }}
+  existingSecret не задан — секреты не подключены. Создайте Secret и укажите
+  его имя: --set existingSecret=synth-gateway-telegram-secrets
+{{- end }}
+
+Мультитенантность (несколько ботов → несколько сред Synth):
+
+{{- if .Values.tenantsFile.enabled }}
+  tenants.json смонтирован из Secret {{ .Values.tenantsFile.secretName | default .Values.existingSecret }}
+  (ключ {{ .Values.tenantsFile.secretKey }}) → {{ .Values.tenantsFile.mountPath }}
+  (GATEWAY_TENANTS_FILE). Шлюз обслуживает N ботов из файла.
+{{- else }}
+  tenantsFile.enabled=false — legacy single-tenant: один бот из
+  env/Secret (TELEGRAM_BOT_TOKEN, SYNTH_URL, …). Для мультитенантности создайте
+  Secret с ключом TENANTS_JSON и включите --set tenantsFile.enabled=true
+  (при необходимости --set tenantsFile.secretName=<secret>).
+{{- end }}
+
+Persistent-хранилище (data-dir):
+
+{{- if .Values.persistence.enabled }}
+  PVC {{ include "synth-gateway-telegram.fullname" . }} ({{ .Values.persistence.size }}) смонтирован в {{ .Values.persistence.mountPath }}.
+{{- else }}
+  persistence.enabled=false — данные эфемерны (каталог контейнера).
+{{- end }}
+
+Внимание: add-on — внешний сервис, а не плагин. Он общается с Synth по API v2,
+MCP и внешним событиям; точек расширения Extension API у него нет
+(AD-086/AD-090, см. docs/addon.md).

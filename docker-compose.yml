@@ -1,0 +1,54 @@
+# Локальный запуск Telegram-шлюза: сервис + volume для data и секретов.
+# Порт health-сервера по умолчанию — 7100 (см. src/gateway/config.ts).
+# Полный справочник переменных и приоритетов — docs/configuration.md.
+#
+# SYNTH_URL указывает на API v2 инстанса Synth. Если Synth запущен на хосте,
+# host.docker.internal резолвится в хостовую машину (Linux — extra_hosts).
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: synth-gateway-telegram:latest
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "7100"
+      GATEWAY_DATA_DIR: /var/lib/synth-gateway/data
+      GATEWAY_SECRETS_DIR: /run/secrets
+      GATEWAY_PARSE_MODE: ${GATEWAY_PARSE_MODE:-plain}
+      GATEWAY_UNKNOWN_ACTION: ${GATEWAY_UNKNOWN_ACTION:-register}
+      SYNTH_URL: ${SYNTH_URL:-http://host.docker.internal:5000/api/v2}
+      # Доверие внутреннему CA (внешний https-инстанс Synth): путь к bundle внутри
+      # контейнера (docs/configuration.md). Пусто = выключено; для использования
+      # смонтируйте certs/ca.crt и задайте NODE_EXTRA_CA_CERTS=/certs/ca.crt.
+      NODE_EXTRA_CA_CERTS: ${NODE_EXTRA_CA_CERTS:-}
+      # Аутентификация Synth API: service-key > OIDC > SYNTH_API_KEY > без auth.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SYNTH_SERVICE_KEY: ${SYNTH_SERVICE_KEY:-}
+      SYNTH_API_KEY: ${SYNTH_API_KEY:-}
+      SYNTH_OIDC_TOKEN_URL: ${SYNTH_OIDC_TOKEN_URL:-}
+      SYNTH_OIDC_DISCOVERY_URL: ${SYNTH_OIDC_DISCOVERY_URL:-}
+      SYNTH_OIDC_CLIENT_ID: ${SYNTH_OIDC_CLIENT_ID:-}
+      SYNTH_OIDC_CLIENT_SECRET: ${SYNTH_OIDC_CLIENT_SECRET:-}
+      SYNTH_OIDC_SCOPE: ${SYNTH_OIDC_SCOPE:-}
+      GATEWAY_ALLOWLIST: ${GATEWAY_ALLOWLIST:-}
+      # Мультитенантность: пусто = автопоиск secrets/tenants.json в /run/secrets.
+      GATEWAY_TENANTS_FILE: ${GATEWAY_TENANTS_FILE:-}
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+    ports:
+      - "7100:7100"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - gateway-data:/var/lib/synth-gateway/data
+      # Секреты монтируются read-only (см. docs/configuration.md). Каталог secrets/
+      # создаётся пользователем локально; при отсутствии — создайте его (пусто = dry-run).
+      - ./secrets:/run/secrets:ro
+      # Внутренний CA для NODE_EXTRA_CA_CERTS (необязательно). По умолчанию закомментировано:
+      # bind-mount отсутствующего файла ломает `docker compose up`. Положите bundle как
+      # certs/ca.crt и раскомментируйте строку ниже (и задайте NODE_EXTRA_CA_CERTS=/certs/ca.crt).
+      # - ./certs/ca.crt:/certs/ca.crt:ro
+    restart: unless-stopped
+
+volumes:
+  gateway-data:
