@@ -199,7 +199,11 @@ describe('Poller: политика неизвестного отправител
     expect(postEvent).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ chatId: '123456789', replyToMessageId: 5 });
-    expect((sendMessage.mock.calls[0]?.[0] as { text: string }).text).toContain('/link ABC-DEF');
+    const text = (sendMessage.mock.calls[0]?.[0] as { text: string }).text;
+    // Привязка — только в UI Synth (claim-flow); команды /link у бота нет.
+    expect(text).toContain('ABC-DEF');
+    expect(text).toContain('Идентичности');
+    expect(text).not.toContain('/link');
   });
 
   it('hint + identityHint + группа: сообщение НЕ отправляем, пишем лог', async () => {
@@ -251,7 +255,7 @@ describe('Poller: политика неизвестного отправител
     await poller.runOnce();
 
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(logs.join('\n')).not.toContain('/link');
+    expect(logs.join('\n')).not.toContain('ABC-DEF');
   });
 
   it('register + identityHint: политика не hint — сообщение не отправляем', async () => {

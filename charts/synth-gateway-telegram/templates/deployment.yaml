@@ -29,6 +29,25 @@ spec:
     metadata:
       labels:
         {{- include "synth-gateway-telegram.selectorLabels" . | nindent 8 }}
+      # Аннотации pod-шаблона: контрольные суммы конфигурации, которая влияет на
+      # поведение пода, но не на сам манифест Deployment (значения чарта и
+      # дополнительно создаваемые объекты). Тех.долг: `tenants.json`
+      # (мультитенантность) читается шлюзом **на старте**, а лежит он в Secret —
+      # либо в `existingSecret`, либо среди `extraObjects` (SealedSecret и т.п.).
+      # Без этих аннотаций `helm upgrade` при изменении только такого Secret
+      # оставлял бы pod-шаблон неизменным, rollout не запускался бы и под
+      # продолжал работать со старым списком тенантов до ручного
+      # `kubectl rollout restart`. Смена чек-суммы меняет pod-шаблон → Helm
+      # перекатывает под (`checksum/extraObjects` реагирует на изменение
+      # ciphertext/содержимого объектов в values).
+      annotations:
+        checksum/extraObjects: {{ .Values.extraObjects | toJson | sha256sum }}
+        {{- if .Values.tenantsFile.enabled }}
+        # Смена параметров монтирования tenants.json (secretName/путь) тоже должна
+        # перекатывать под: сам Secret чарт прочитать не может, но структура
+        # подключения зафиксирована в values.
+        checksum/tenantsFile: {{ .Values.tenantsFile | toJson | sha256sum }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

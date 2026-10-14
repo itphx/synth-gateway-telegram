@@ -93,7 +93,13 @@ helm upgrade --install synth-gateway-telegram charts/synth-gateway-telegram \
   проставленную вручную на живом объекте аннотацию не видит. Дефолт — `false`.
 - **Мультитенантность:** `tenants.json` кладётся в Secret ключом `TENANTS_JSON`;
   чарт монтирует его файлом и выставляет `GATEWAY_TENANTS_FILE`
-  (`--set tenantsFile.enabled=true`).
+  (`--set tenantsFile.enabled=true`). Шлюз читает файл **на старте**, поэтому
+  чарт добавляет в pod-шаблон аннотацию `checksum/extraObjects` (и
+  `checksum/tenantsFile` при включённом файле): `helm upgrade` при изменении
+  `extraObjects`/values меняет pod-шаблон и перекатывает под — новый список
+  тенантов применяется автоматически, без ручного `kubectl rollout restart`.
+  Если Secret тенантов создаётся **вне** `values`/`extraObjects`, перекат
+  по-прежнему нужен вручную.
 - **Внутренний CA:** `--set ca.enabled=true --set-file ca.caCert=<ca.pem>` либо
   `ca.existingConfigMap`; чарт монтирует файл и выставляет `NODE_EXTRA_CA_CERTS`.
 - **Прокси Bot API** приходит только из Secret (ключ `TELEGRAM_PROXY_URL`), не из
@@ -120,4 +126,9 @@ helm template x charts/synth-gateway-telegram | grep -c GATEWAY_TENANTS_FILE   #
 helm template x charts/synth-gateway-telegram \
   --set existingSecret=synth-gateway-telegram-secrets --set tenantsFile.enabled=true \
   | grep -A2 GATEWAY_TENANTS_FILE        # → value: "/etc/gateway/tenants.json"
+
+# чек-сумма pod-шаблона (перекат пода при изменении extraObjects/tenantsFile)
+helm template x charts/synth-gateway-telegram \
+  --set existingSecret=synth-gateway-telegram-secrets --set tenantsFile.enabled=true \
+  | grep -A4 'checksum/extraObjects'      # → spec.template.metadata.annotations
 ```

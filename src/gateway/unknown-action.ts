@@ -37,9 +37,6 @@ export const UNKNOWN_REJECT_KEY = 'gateway.unknown_sender_reject';
  */
 export const UNKNOWN_HINT_NOT_PRIVATE_KEY = 'gateway.identity_hint_not_private';
 
-/** Заглушка команды линковки: код формирует ядро (этап 4), шлюз его не создаёт. */
-export const LINK_COMMAND_PLACEHOLDER = '/link <код>';
-
 /** Базовый текст подсказки `hint` (без кода — код придёт от ядра, этап 4). */
 export const UNKNOWN_HINT_TEXT =
   'Вы не сопоставлены с учётной записью Synth. Сообщение будет обработано, ' +
@@ -67,10 +64,19 @@ export type SenderKnownResolver = (identity: EventIdentity) => boolean | Promise
 export const unknownSenderResolver: SenderKnownResolver = () => false;
 
 /**
- * Собирает текст подсказки `hint` (этап 4, claim-flow). Команда линковки
+ * Собирает текст подсказки `hint` (этап 4, claim-flow). Инструкция по коду
  * добавляется **только** если код пришёл от ядра; шлюз коды не генерирует.
  * Поллер шлёт этот текст в чат, когда ядро вернуло `identityHint`.
+ *
+ * Привязка идентичности выполняется **только в UI Synth**:
+ * `POST /api/v2/me/identities/claim` подтверждает владение идентификатором
+ * аутентифицированный человек (AD-089 claim-flow). Команды `/link` у бота нет —
+ * бот не может привязать чат к учётной записи за пользователя, поэтому
+ * подсказка ведёт в UI, а не в чат.
  */
 export function buildUnknownHint(code?: string): string {
-  return code ? `${UNKNOWN_HINT_TEXT}\nДля привязки: /link ${code}` : UNKNOWN_HINT_TEXT;
+  return code
+    ? `${UNKNOWN_HINT_TEXT}\nЧтобы привязать этот чат, откройте Synth → ` +
+        `Настройки → Профиль → Идентичности и введите код: ${code} (действует 10 минут).`
+    : UNKNOWN_HINT_TEXT;
 }

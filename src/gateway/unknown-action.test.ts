@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_UNKNOWN_ACTION,
-  LINK_COMMAND_PLACEHOLDER,
   UNKNOWN_ACTION_VALUES,
   UNKNOWN_HINT_TEXT,
   UNKNOWN_REJECT_TEXT,
@@ -40,18 +39,18 @@ describe('unknownSenderResolver (fail-closed до этапа 3)', () => {
 });
 
 describe('buildUnknownHint (этап 4)', () => {
-  it('без кода — текст без команды (шлюз коды не генерирует)', () => {
+  it('без кода — текст без инструкции (шлюз коды не генерирует)', () => {
     const text = buildUnknownHint();
     expect(text).toBe(UNKNOWN_HINT_TEXT);
     expect(text).not.toContain('/link');
   });
 
-  it('с кодом от ядра — добавляет команду /link <код>', () => {
-    expect(buildUnknownHint('abc123')).toContain('/link abc123');
-  });
-
-  it('заглушка команды линковки документирована', () => {
-    expect(LINK_COMMAND_PLACEHOLDER).toBe('/link <код>');
+  it('с кодом от ядра — ведёт в UI Synth (Профиль → Идентичности), а не /link', () => {
+    const text = buildUnknownHint('abc123');
+    expect(text).toContain('abc123');
+    expect(text).toContain('Профиль');
+    expect(text).toContain('Идентичности');
+    expect(text).not.toContain('/link');
   });
 });
 

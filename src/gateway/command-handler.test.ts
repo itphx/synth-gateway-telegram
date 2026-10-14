@@ -157,10 +157,11 @@ describe('CommandHandler', () => {
     expect(lastText()).toContain('Иван Иванов');
   });
 
-  it('/help упоминает линковку с учётной записью по коду', async () => {
+  it('/help указывает связку с учётной записью по коду в UI Synth', async () => {
     await handler().handle(commandEvent('help'));
     expect(lastText()).toContain('учётной запис');
     expect(lastText()).toContain('код');
+    expect(lastText()).toContain('Идентичности');
   });
 
   it('/bind без аргумента создаёт сессию и привязку', async () => {
