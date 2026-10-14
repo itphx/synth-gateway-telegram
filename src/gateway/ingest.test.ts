@@ -248,4 +248,21 @@ describe('SynthEventsClient: сессии', () => {
     ).rejects.toMatchObject({ status: 500 });
     expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
+
+  it('abortSession отправляет POST /sessions/:id/abort', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { status: 'aborted' }));
+    await expect(
+      client(fetchImpl as unknown as typeof fetch).abortSession('sess/1'),
+    ).resolves.toBeUndefined();
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:5000/api/v2/sessions/sess%2F1/abort');
+    expect(init.method).toBe('POST');
+  });
+
+  it('abortSession 404 → ошибка SynthEventsError', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(404, { error: { code: 'NOT_FOUND' } }));
+    await expect(
+      client(fetchImpl as unknown as typeof fetch).abortSession('missing'),
+    ).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' });
+  });
 });

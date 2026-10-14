@@ -30,6 +30,7 @@ export function helpText(): string {
     '/unbind — снять привязку чата (ADMIN/LEAD)',
     '/new — новая сессия для чата (ADMIN/LEAD)',
     '/status — состояние шлюза',
+    '/stop — остановить ответ агента',
     '/help — эта справка',
     'Связка с учётной записью Synth — по коду в UI Synth (Настройки → Профиль → Идентичности).',
   ].join('\n');
@@ -102,6 +103,9 @@ export class CommandHandler {
         case 'status':
           await this.status(event);
           break;
+        case 'stop':
+          await this.stop(event);
+          break;
         case 'bind':
           await this.bind(event, event.payload.args ?? '');
           break;
@@ -149,6 +153,18 @@ export class CommandHandler {
       `Режим: ${this.dryRun ? 'dry-run' : 'live'}`,
     ];
     await this.replyTo(chatId, lines.join('\n'), threadId, messageId);
+  }
+
+  /** `/stop` — прерывает активный ответ агента в сессии чата. */
+  private async stop(event: SynthEventInput): Promise<void> {
+    const chatKey = event.identity.chatKey;
+    const state = chatKey ? await this.store.getChatSession(chatKey) : undefined;
+    if (!state) {
+      await this.reply(event, 'Нет активной сессии для этого чата.');
+      return;
+    }
+    await this.synth.abortSession(state.sessionId);
+    await this.reply(event, '⏹ Остановлено.');
   }
 
   /** `/bind [sessionId]` — привязка чата к новой или существующей сессии. */

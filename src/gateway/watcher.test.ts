@@ -7,12 +7,17 @@ import type { TelegramClient } from '../bot-api/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GatewayStore } from './store.js';
-import { AgentWatcher, chunkText, escapeHtml, parseSseData } from './watcher.js';
+import { AgentWatcher, chunkText, escapeHtml, parseSseData, TELEGRAM_MESSAGE_LIMIT } from './watcher.js';
 
 const CHAT_KEY = 'chat:telegram:123456789';
 const SESSION_ID = 'sess_1';
 
-function makeClient(): { client: TelegramClient; sendMessage: ReturnType<typeof vi.fn> } {
+function makeClient(): {
+  client: TelegramClient;
+  sendMessage: ReturnType<typeof vi.fn>;
+  editMessageText: ReturnType<typeof vi.fn>;
+  sendChatAction: ReturnType<typeof vi.fn>;
+} {
   let nextId = 100;
   const sendMessage = vi.fn(async (params: Record<string, unknown>) => ({
     ok: true,
@@ -20,7 +25,29 @@ function makeClient(): { client: TelegramClient; sendMessage: ReturnType<typeof 
     result: { message_id: (nextId += 1) },
     ...params,
   }));
-  return { client: { dryRun: true, sendMessage } as unknown as TelegramClient, sendMessage };
+  const editMessageText = vi.fn(async (params: Record<string, unknown>) => ({
+    ok: true,
+    dryRun: true,
+    result: { message_id: (params.message_id as number | undefined) ?? 0 },
+    ...params,
+  }));
+  const sendChatAction = vi.fn(async (params: Record<string, unknown>) => ({
+    ok: true,
+    dryRun: true,
+    result: true,
+    ...params,
+  }));
+  return {
+    client: {
+      dryRun: true,
+      sendMessage,
+      editMessageText,
+      sendChatAction,
+    } as unknown as TelegramClient,
+    sendMessage,
+    editMessageText,
+    sendChatAction,
+  };
 }
 
 describe('parseSseData', () => {
@@ -194,6 +221,296 @@ describe('AgentWatcher.handleEvent', () => {
       text: '&lt;b&gt;жирный&lt;/b&gt; &amp; Co',
       parseMode: 'HTML',
     });
+  });
+});
+
+describe('AgentWatcher: стриминг и индикатор «Печатает…»', () => {
+  let dir: string;
+  let store: GatewayStore;
+  let client: TelegramClient;
+  let sendMessage: ReturnType<typeof vi.fn>;
+  let editMessageText: ReturnType<typeof vi.fn>;
+  let sendChatAction: ReturnType<typeof vi.fn>;
+  let watcher: AgentWatcher;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    dir = await mkdtemp(join(tmpdir(), 'gateway-stream-'));
+    store = new GatewayStore(dir);
+    await store.init();
+    ({ client, sendMessage, editMessageText, sendChatAction } = makeClient());
+    await store.setChatSession(CHAT_KEY, {
+      sessionId: SESSION_ID,
+      chatId: '123456789',
+      threadId: 7,
+      lastInboundMessageId: 42,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    watcher = new AgentWatcher({ baseUrl: 'http://127.0.0.1:5000/api/v2', client, store });
+  });
+
+  afterEach(async () => {
+    watcher.stop();
+    vi.useRealTimers();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const chunk = (data: Record<string, unknown>, sessionId = SESSION_ID): Promise<void> =>
+    watcher.handleEvent({ type: 'stream.chunk', sessionId, data });
+
+  it('включает «Печатает…» на stream.start и повторяет каждые ~4 c', async () => {
+    await watcher.handleEvent({
+      type: 'stream.start',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1' },
+    });
+    expect(sendChatAction).toHaveBeenCalledTimes(1);
+    expect(sendChatAction.mock.calls[0]?.[0]).toMatchObject({
+      chatId: '123456789',
+      action: 'typing',
+      messageThreadId: 7,
+    });
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(sendChatAction).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(sendChatAction).toHaveBeenCalledTimes(3);
+  });
+
+  it('stop() гасит индикатор', async () => {
+    await watcher.handleEvent({
+      type: 'stream.start',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1' },
+    });
+    expect(sendChatAction).toHaveBeenCalledTimes(1);
+    watcher.stop();
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(sendChatAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('до появления контента держит только индикатор (reasoning не стримится)', async () => {
+    await watcher.handleEvent({
+      type: 'stream.start',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1' },
+    });
+    await chunk({ stream_id: 's1', reasoning: 'размышление' });
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(editMessageText).not.toHaveBeenCalled();
+    expect(sendChatAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('накапливает чанки: создаёт live-сообщение и правит с троттлингом', async () => {
+    await chunk({ stream_id: 's1', content: 'Привет' });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      chatId: '123456789',
+      text: 'Привет',
+      replyToMessageId: 42,
+      messageThreadId: 7,
+    });
+
+    // Второй чанк сразу — окно троттлинга не истекло, правки нет.
+    await chunk({ stream_id: 's1', content: ' мир' });
+    expect(editMessageText).not.toHaveBeenCalled();
+
+    // После окна — правка накопленным текстом.
+    await vi.advanceTimersByTimeAsync(1500);
+    await chunk({ stream_id: 's1', content: '!' });
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(editMessageText.mock.calls[0]?.[0]).toMatchObject({
+      messageId: 101,
+      text: 'Привет мир!',
+    });
+  });
+
+  it('не правит сообщение, если текст не изменился', async () => {
+    await chunk({ stream_id: 's1', content: 'текст' });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    await chunk({ stream_id: 's1', reasoning: 'ещё думаю' });
+    expect(editMessageText).not.toHaveBeenCalled();
+  });
+
+  it('обрезает live-сообщение по лимиту Telegram', async () => {
+    await chunk({ stream_id: 's1', content: 'x'.repeat(5000) });
+    const text = sendMessage.mock.calls[0]?.[0]?.text as string;
+    expect(text.length).toBe(TELEGRAM_MESSAGE_LIMIT);
+    expect(text.endsWith('…')).toBe(true);
+  });
+
+  it('parseMode html экранирует live-сообщение', async () => {
+    watcher = new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+      parseMode: 'html',
+    });
+    await chunk({ stream_id: 's1', content: '<b>a</b> & b' });
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      text: '&lt;b&gt;a&lt;/b&gt; &amp; b',
+      parseMode: 'HTML',
+    });
+  });
+
+  it('stream.done редактирует live-сообщение полным контентом и дедуплицирует', async () => {
+    await chunk({ stream_id: 's1', content: 'Часть' });
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'Полный ответ', message_index: 3 },
+    });
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(editMessageText.mock.calls[0]?.[0]).toMatchObject({
+      messageId: 101,
+      text: 'Полный ответ',
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1); // только live-сообщение
+
+    // Повторный done (reconnect) — без дубля.
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'Полный ответ', message_index: 3 },
+    });
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    // Индикатор остановлен.
+    const typingCalls = sendChatAction.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(sendChatAction).toHaveBeenCalledTimes(typingCalls);
+  });
+
+  it('stream.done длинного ответа: первый чанк в live, остальные — новыми сообщениями', async () => {
+    await chunk({ stream_id: 's1', content: 'начало' });
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'a'.repeat(5000) },
+    });
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(2); // live + продолжение
+  });
+
+  it('чанки после финала игнорируются', async () => {
+    await chunk({ stream_id: 's1', content: 'контент' });
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'контент', message_index: 1 },
+    });
+    sendMessage.mockClear();
+    editMessageText.mockClear();
+    await chunk({ stream_id: 's1', content: 'допоздний' });
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(editMessageText).not.toHaveBeenCalled();
+  });
+
+  it('stream.done без content финализирует накопленным текстом', async () => {
+    await chunk({ stream_id: 's1', content: 'накоплено' });
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', message_index: 7 },
+    });
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      messageId: 101,
+      text: 'накоплено',
+    });
+  });
+
+  it('stream.done без контента и live ничего не шлёт', async () => {
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's-empty', message_index: 8 },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(editMessageText).not.toHaveBeenCalled();
+  });
+
+  it('stream.cancelled финализирует частичным текстом с пометкой', async () => {
+    await chunk({ stream_id: 's1', content: 'частичный' });
+    await watcher.handleEvent({
+      type: 'stream.cancelled',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'частичный ответ' },
+    });
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      messageId: 101,
+      text: 'частичный ответ\n\n⏹ Остановлено',
+    });
+    const typingCalls = sendChatAction.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(sendChatAction).toHaveBeenCalledTimes(typingCalls);
+  });
+
+  it('stream.cancelled без контента и live → короткая пометка', async () => {
+    await watcher.handleEvent({
+      type: 'stream.cancelled',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's-empty' },
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ text: '⏹ Остановлено' });
+  });
+
+  it('stream.error правит live-сообщение, если оно есть', async () => {
+    await chunk({ stream_id: 's1', content: 'текст' });
+    sendMessage.mockClear();
+    await watcher.handleEvent({
+      type: 'stream.error',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', error: 'сбой провайдера' },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      messageId: 101,
+      text: expect.stringContaining('Ошибка агента'),
+    });
+  });
+
+  it('stream.retry добавляет приписку в live-сообщение', async () => {
+    await chunk({ stream_id: 's1', content: 'текст' });
+    await watcher.handleEvent({
+      type: 'stream.retry',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', attempt: 2, max_retries: 3 },
+    });
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      messageId: 101,
+      text: 'текст\n\n↻ повтор 2/3…',
+    });
+  });
+
+  it('при 429 (retry_after) не спамит правками', async () => {
+    await chunk({ stream_id: 's1', content: 'a' });
+    editMessageText.mockResolvedValueOnce({
+      ok: false,
+      error_code: 429,
+      parameters: { retry_after: 10 },
+    });
+    await vi.advanceTimersByTimeAsync(1500);
+    await chunk({ stream_id: 's1', content: 'b' });
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+
+    // Внутри окна retry_after правки подавляются.
+    await vi.advanceTimersByTimeAsync(1500);
+    await chunk({ stream_id: 's1', content: 'c' });
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+
+    // После окна — правка снова идёт.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await chunk({ stream_id: 's1', content: 'd' });
+    expect(editMessageText).toHaveBeenCalledTimes(2);
+  });
+
+  it('ошибки Telegram не роняют watcher', async () => {
+    sendMessage.mockRejectedValueOnce(new Error('boom'));
+    await expect(chunk({ stream_id: 's1', content: 'x' })).resolves.toBeUndefined();
+    await chunk({ stream_id: 's1', content: 'y' });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
   });
 });
 

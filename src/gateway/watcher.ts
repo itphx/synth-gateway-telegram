@@ -1,4 +1,4 @@
-import type { TelegramClient } from '../bot-api/index.js';
+import type { BotApiResponse, TelegramClient } from '../bot-api/index.js';
 
 import type { BearerProvider } from './auth.js';
 import type { ParseMode } from './config.js';
@@ -7,6 +7,40 @@ import type { GatewayStore, SessionRoute } from './store.js';
 
 /** Максимальная длина сообщения Telegram. */
 export const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+/** Интервал повтора статуса «Печатает…», мс (Telegram держит статус ~5 c). */
+export const TYPING_INTERVAL_MS = 4000;
+
+/** Минимальный интервал между правками live-сообщения, мс. */
+export const EDIT_THROTTLE_MS = 1500;
+
+/** Метка, добавляемая к частичному ответу при остановке (`/stop`). */
+export const STOPPED_MARK = '⏹ Остановлено';
+
+/** Максимум запоминаемых завершённых `stream_id` (защита от допоздних чанков). */
+const FINALIZED_STREAMS_LIMIT = 500;
+
+/**
+ * Состояние активного стрима сессии (live-сообщение Telegram + индикатор
+ * «Печатает…»). `text` — накопленный контент (reasoning не накапливается и в
+ * Telegram не стримится), `rendered` — последний отправленный/отредактированный
+ * текст (чтобы не ловить 400 `message is not modified`).
+ */
+interface LiveStream {
+  streamId?: string;
+  /** id редактируемого live-сообщения Telegram (появляется с первым контентом). */
+  messageId?: number;
+  /** Накопленный контент (без reasoning). */
+  text: string;
+  /** Служебная приписка (например, «↻ повтор 2/3…»). */
+  note?: string;
+  /** Время последней правки live-сообщения (или её отложенного повтора при 429). */
+  lastEditAt: number;
+  /** Последний отправленный текст; правка не шлётся, если текст не изменился. */
+  rendered?: string;
+  typingTimer?: ReturnType<typeof setInterval>;
+  finalized: boolean;
+}
 
 /** Событие глобального SSE-потока `GET /events` (конверт ядра). */
 export interface SseEvent {
@@ -91,9 +125,12 @@ export function escapeHtml(text: string): string {
 
 /**
  * Watcher ответов агента: слушает глобальный SSE `GET /events` и доставляет
- * ответы (`stream.done`, фоллбек `message.added`, `stream.error`) в чаты,
- * привязанные к сессиям. Переподключается с backoff; дедуп исходящих —
- * персистентный (`GatewayStore.sent`).
+ * ответы в чаты, привязанные к сессиям. Пока агент генерирует ответ, в чате
+ * держится индикатор «Печатает…» и стримится live-сообщение (накопленный
+ * контент, троттлинг правок); финал приходит из `stream.done` (фоллбек —
+ * `message.added`), отмена — `stream.cancelled`, сбой — `stream.error`.
+ * Переподключается с backoff; дедуп исходящих — персистентный
+ * (`GatewayStore.sent`).
  */
 export class AgentWatcher {
   private readonly baseUrl: string;
@@ -109,6 +146,10 @@ export class AgentWatcher {
   private readonly log: (message: string) => void;
   private controller?: AbortController;
   private stopped = false;
+  /** Активные стримы по сессиям (live-сообщение + индикатор). */
+  private readonly live = new Map<string, LiveStream>();
+  /** Завершённые `stream_id` — допоздние чанки после `done`/`cancelled` игнорируются. */
+  private readonly finalizedStreams = new Set<string>();
 
   constructor(options: WatcherOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -124,10 +165,12 @@ export class AgentWatcher {
     this.log = options.log ?? (() => {});
   }
 
-  /** Останавливает watcher (прерывает активное SSE-соединение). */
+  /** Останавливает watcher (прерывает SSE-соединение и гасит индикаторы). */
   stop(): void {
     this.stopped = true;
     this.controller?.abort();
+    for (const live of this.live.values()) this.clearTyping(live);
+    this.live.clear();
   }
 
   /** Цикл подключения к SSE с переподключением и backoff. */
@@ -216,53 +259,323 @@ export class AgentWatcher {
     const route = await this.store.getSessionRoute(sessionId);
     if (!route) return;
 
-    if (event.type === 'stream.error') {
-      const streamId = str(event.data.stream_id) ?? `${sessionId}:error`;
-      const key = `error:${streamId}`;
-      if (await this.store.hasSent(key)) return;
-      await this.store.markSent(key);
-      const message = str(event.data.error) ?? 'Неизвестная ошибка';
-      await this.deliver(route, `⚠️ Ошибка агента: ${message}`);
+    switch (event.type) {
+      case 'stream.start':
+        this.startTyping(sessionId, route, str(event.data.stream_id));
+        return;
+      case 'stream.chunk':
+        await this.onStreamChunk(sessionId, route, event.data);
+        return;
+      case 'stream.retry':
+        await this.onStreamRetry(sessionId, route, event.data);
+        return;
+      case 'stream.cancelled':
+        await this.onStreamCancelled(sessionId, route, event);
+        return;
+      case 'stream.error':
+        await this.onStreamError(sessionId, route, event.data);
+        return;
+      case 'stream.done':
+        await this.onStreamDone(sessionId, route, event);
+        return;
+      case 'message.added':
+        // Фоллбек: без стрима ответ приходит как `message.added` (content обрезан ядром).
+        await this.onMessageAdded(sessionId, route, event.data);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /** `stream.chunk` — накопление контента и правка live-сообщения. */
+  private async onStreamChunk(
+    sessionId: string,
+    route: SessionRoute,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const streamId = str(data.stream_id);
+    if (streamId !== undefined && this.finalizedStreams.has(streamId)) return;
+    const live = this.ensureLive(sessionId, streamId);
+    if (live.finalized) return;
+    this.startTypingFor(route, live);
+
+    // `content` — дельта контента; `is_final`-чанк приходит с пустым `content`.
+    const delta = str(data.content);
+    if (delta) live.text += delta;
+    // reasoning в Telegram не стримим: пока контента нет — только «Печатает…».
+    if (live.text.length === 0) return;
+    await this.flushLive(route, live, false);
+  }
+
+  /** `stream.retry` — приписка «↻ повтор N/MAX…» в live-сообщение (best-effort). */
+  private async onStreamRetry(
+    sessionId: string,
+    route: SessionRoute,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const live = this.live.get(sessionId);
+    if (!live || live.finalized) return;
+    const attempt = num(data.attempt);
+    if (attempt === undefined) return;
+    const max = num(data.max_retries);
+    live.note = `↻ повтор ${attempt}${max !== undefined ? `/${max}` : ''}…`;
+    if (live.messageId === undefined || live.text.length === 0) return;
+    await this.flushLive(route, live, true);
+  }
+
+  /** `stream.cancelled` — финализация частичным текстом с пометкой об остановке. */
+  private async onStreamCancelled(
+    sessionId: string,
+    route: SessionRoute,
+    event: SseEvent,
+  ): Promise<void> {
+    const live = this.live.get(sessionId);
+    const streamId =
+      str(event.data.stream_id) ?? live?.streamId ?? `${sessionId}:${event.timestamp ?? ''}`;
+    const key = `stream:${streamId}`;
+    if (await this.store.hasSent(key)) {
+      this.finishLive(sessionId, live);
       return;
     }
+    await this.store.markSent(key);
+    this.markFinalized(streamId);
+    this.finishLive(sessionId, live);
+    const content = str(event.data.content) ?? live?.text ?? '';
+    await this.finalize(route, live, content, STOPPED_MARK);
+  }
 
-    if (event.type === 'stream.done') {
-      const content = str(event.data.content);
-      if (!content) return;
-      const streamId = str(event.data.stream_id) ?? `${sessionId}:${event.timestamp ?? ''}`;
-      const messageIndex = num(event.data.message_index);
-      if (messageIndex !== undefined && (await this.store.hasSent(`message:${sessionId}:${messageIndex}`))) {
+  /** `stream.error` — правка live-сообщения (если есть) либо новое уведомление. */
+  private async onStreamError(
+    sessionId: string,
+    route: SessionRoute,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const live = this.live.get(sessionId);
+    const streamId = str(data.stream_id) ?? live?.streamId ?? `${sessionId}:error`;
+    const key = `error:${streamId}`;
+    if (await this.store.hasSent(key)) {
+      this.finishLive(sessionId, live);
+      return;
+    }
+    await this.store.markSent(key);
+    this.markFinalized(streamId);
+    this.finishLive(sessionId, live);
+
+    const message = str(data.error) ?? 'Неизвестная ошибка';
+    const raw = `⚠️ Ошибка агента: ${message}`;
+    if (live?.messageId !== undefined) {
+      const edited = await this.safeEdit(route, live.messageId, this.renderText(raw));
+      if (edited) {
+        await this.rememberOutbound(route, live.messageId);
         return;
       }
-      const key = `stream:${streamId}`;
-      if (await this.store.hasSent(key)) return;
-      await this.store.markSent(key);
-      if (messageIndex !== undefined) await this.store.markSent(`message:${sessionId}:${messageIndex}`);
-      await this.deliver(route, content);
+    }
+    await this.deliver(route, raw);
+  }
+
+  /** `stream.done` — финал: live-сообщение редактируется полным контентом. */
+  private async onStreamDone(
+    sessionId: string,
+    route: SessionRoute,
+    event: SseEvent,
+  ): Promise<void> {
+    const live = this.live.get(sessionId);
+    const streamId =
+      str(event.data.stream_id) ?? live?.streamId ?? `${sessionId}:${event.timestamp ?? ''}`;
+    const content = str(event.data.content) ?? live?.text ?? '';
+    // Нечего доставлять (нет контента и live-сообщения не было) — как раньше,
+    // не помечаем stream как отправленный; индикатор гасим.
+    if (!content && live?.messageId === undefined) {
+      this.finishLive(sessionId, live);
+      return;
+    }
+    const messageIndex = num(event.data.message_index);
+    if (
+      messageIndex !== undefined &&
+      (await this.store.hasSent(`message:${sessionId}:${messageIndex}`))
+    ) {
+      this.finishLive(sessionId, live);
+      return;
+    }
+    const key = `stream:${streamId}`;
+    if (await this.store.hasSent(key)) {
+      this.finishLive(sessionId, live);
+      return;
+    }
+    await this.store.markSent(key);
+    if (messageIndex !== undefined) await this.store.markSent(`message:${sessionId}:${messageIndex}`);
+    this.markFinalized(streamId);
+    this.finishLive(sessionId, live);
+    await this.finalize(route, live, content);
+  }
+
+  /** Фоллбек-доставка `message.added` (assistant) без стрима. */
+  private async onMessageAdded(
+    sessionId: string,
+    route: SessionRoute,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    if (str(data.role)?.toLowerCase() !== 'assistant') return;
+    const content = str(data.content);
+    if (!content) return;
+    const messageIndex = num(data.message_index);
+    const key =
+      messageIndex !== undefined
+        ? `message:${sessionId}:${messageIndex}`
+        : `message-content:${sessionId}:${str(data.stream_id) ?? content.length}`;
+    if (await this.store.hasSent(key)) return;
+    await this.store.markSent(key);
+    await this.deliver(route, content);
+  }
+
+  /** Стартует индикатор «Печатает…» для сессии (если ещё не запущен). */
+  private startTyping(sessionId: string, route: SessionRoute, streamId?: string): void {
+    const live = this.ensureLive(sessionId, streamId);
+    this.startTypingFor(route, live);
+  }
+
+  private startTypingFor(route: SessionRoute, live: LiveStream): void {
+    if (live.finalized || live.typingTimer) return;
+    void this.sendTyping(route);
+    const timer = setInterval(() => {
+      void this.sendTyping(route);
+    }, TYPING_INTERVAL_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    live.typingTimer = timer;
+  }
+
+  /** Разовая отправка статуса «печатает…» (ошибки Telegram не роняют watcher). */
+  private async sendTyping(route: SessionRoute): Promise<void> {
+    try {
+      await this.client.sendChatAction({
+        chatId: route.chatId,
+        action: 'typing',
+        ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
+      });
+    } catch (error) {
+      this.log(`[gateway] watcher: не удалось отправить статус «печатает»: ${errorMessage(error)}`);
+    }
+  }
+
+  /** Гасит таймер индикатора. */
+  private clearTyping(live: LiveStream): void {
+    if (!live.typingTimer) return;
+    clearInterval(live.typingTimer);
+    live.typingTimer = undefined;
+  }
+
+  /** Возвращает (при необходимости создаёт) состояние стрима сессии. */
+  private ensureLive(sessionId: string, streamId?: string): LiveStream {
+    let live = this.live.get(sessionId);
+    if (live && streamId !== undefined && live.streamId !== undefined && live.streamId !== streamId) {
+      // Новый стрим в той же сессии — предыдущий больше не актуален.
+      this.clearTyping(live);
+      live = undefined;
+    }
+    if (!live) {
+      live = {
+        text: '',
+        lastEditAt: 0,
+        finalized: false,
+        ...(streamId !== undefined ? { streamId } : {}),
+      };
+      this.live.set(sessionId, live);
+    } else if (streamId !== undefined && live.streamId === undefined) {
+      live.streamId = streamId;
+    }
+    return live;
+  }
+
+  /** Останавливает индикатор и убирает состояние стрима. */
+  private finishLive(sessionId: string, live: LiveStream | undefined): void {
+    if (live) {
+      live.finalized = true;
+      this.clearTyping(live);
+    }
+    this.live.delete(sessionId);
+  }
+
+  private markFinalized(streamId: string): void {
+    this.finalizedStreams.add(streamId);
+    if (this.finalizedStreams.size > FINALIZED_STREAMS_LIMIT) {
+      const oldest = this.finalizedStreams.values().next().value;
+      if (oldest !== undefined) this.finalizedStreams.delete(oldest);
+    }
+  }
+
+  /**
+   * Отправляет live-сообщение при первом контенте либо правит его с
+   * троттлингом. Правка не шлётся, если текст не изменился (иначе Telegram
+   * отвечает 400 `message is not modified`).
+   */
+  private async flushLive(route: SessionRoute, live: LiveStream, force: boolean): Promise<void> {
+    const body = this.renderLive(live);
+    if (body === live.rendered) return;
+    const now = Date.now();
+
+    if (live.messageId === undefined) {
+      const id = await this.sendText(route, body);
+      if (id === undefined) return;
+      live.messageId = id;
+      live.lastEditAt = now;
+      live.rendered = body;
+      await this.rememberOutbound(route, id);
       return;
     }
 
-    // Фоллбек: без стрима ответ приходит как `message.added` (content обрезан ядром).
-    if (event.type === 'message.added') {
-      if (str(event.data.role)?.toLowerCase() !== 'assistant') return;
-      const content = str(event.data.content);
-      if (!content) return;
-      const messageIndex = num(event.data.message_index);
-      const key =
-        messageIndex !== undefined
-          ? `message:${sessionId}:${messageIndex}`
-          : `message-content:${sessionId}:${str(event.data.stream_id) ?? content.length}`;
-      if (await this.store.hasSent(key)) return;
-      await this.store.markSent(key);
-      await this.deliver(route, content);
+    if (!force && now - live.lastEditAt < EDIT_THROTTLE_MS) return;
+    const result = await this.editText(route, live.messageId, body);
+    if (result.ok) {
+      live.lastEditAt = now;
+      live.rendered = body;
+      return;
     }
+    // 429 — уважаем `retry_after`: не спамим правками до истечения окна.
+    if (result.retryAfterMs !== undefined) live.lastEditAt = now + result.retryAfterMs;
+  }
+
+  /**
+   * Финал стрима: live-сообщение редактируется первым чанком, остальные
+   * досылаются новыми сообщениями; без live — обычная доставка с чанкингом.
+   */
+  private async finalize(
+    route: SessionRoute,
+    live: LiveStream | undefined,
+    text: string,
+    marker?: string,
+  ): Promise<void> {
+    const body = marker ? (text ? `${text}\n\n${marker}` : marker) : text;
+    if (!body) return;
+    const chunks = chunkText(body);
+    if (live?.messageId === undefined) {
+      await this.deliver(route, body);
+      return;
+    }
+
+    const first = this.renderText(chunks[0] ?? '');
+    await this.safeEdit(route, live.messageId, first);
+    live.rendered = first;
+    let lastMessageId = live.messageId;
+    for (const chunk of chunks.slice(1)) {
+      const id = await this.sendText(route, this.renderText(chunk));
+      if (id !== undefined) lastMessageId = id;
+    }
+    await this.rememberOutbound(route, lastMessageId);
   }
 
   /** Отправляет текст в чат маршрута (с чанкингом) и обновляет состояние. */
   private async deliver(route: SessionRoute, text: string): Promise<void> {
     let lastMessageId: number | undefined;
     for (const chunk of chunkText(text)) {
-      const body = this.parseMode === 'html' ? escapeHtml(chunk) : chunk;
+      const id = await this.sendText(route, this.renderText(chunk));
+      if (id !== undefined) lastMessageId = id;
+    }
+    await this.rememberOutbound(route, lastMessageId);
+  }
+
+  /** Отправляет одно сообщение; ошибки Telegram логируются и не бросаются. */
+  private async sendText(route: SessionRoute, body: string): Promise<number | undefined> {
+    try {
       const response = await this.client.sendMessage({
         chatId: route.chatId,
         text: body,
@@ -272,9 +585,65 @@ export class AgentWatcher {
           ? { replyToMessageId: route.lastInboundMessageId }
           : {}),
       });
-      lastMessageId = response.result?.message_id ?? lastMessageId;
+      if (response.ok === false) {
+        this.log(`[gateway] watcher: Telegram отклонил sendMessage: ${describeBotError(response)}`);
+        return undefined;
+      }
+      return response.result?.message_id;
+    } catch (error) {
+      this.log(`[gateway] watcher: ошибка sendMessage: ${errorMessage(error)}`);
+      return undefined;
     }
-    await this.rememberOutbound(route, lastMessageId);
+  }
+
+  /** Правка сообщения с разбором исхода (ok / retry_after при 429). */
+  private async editText(
+    route: SessionRoute,
+    messageId: number,
+    body: string,
+  ): Promise<{ ok: boolean; retryAfterMs?: number }> {
+    try {
+      const response = await this.client.editMessageText({
+        chatId: route.chatId,
+        messageId,
+        text: body,
+        ...(this.parseMode === 'html' ? { parseMode: 'HTML' as const } : {}),
+      });
+      if (response.ok === false) {
+        this.log(
+          `[gateway] watcher: Telegram отклонил editMessageText (${messageId}): ${describeBotError(response)}`,
+        );
+        const retryAfter = retryAfterMs(response);
+        return { ok: false, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
+      }
+      return { ok: true };
+    } catch (error) {
+      this.log(`[gateway] watcher: ошибка editMessageText (${messageId}): ${errorMessage(error)}`);
+      return { ok: false };
+    }
+  }
+
+  /** Правка без разбора исхода — для финала (ошибки логируются внутри). */
+  private async safeEdit(route: SessionRoute, messageId: number, body: string): Promise<boolean> {
+    const result = await this.editText(route, messageId, body);
+    return result.ok;
+  }
+
+  /** Текст live-сообщения: накопленный контент + приписка, с обрезкой по лимиту. */
+  private renderLive(live: LiveStream): string {
+    const text = live.note ? `${live.text}\n\n${live.note}` : live.text;
+    return this.renderText(text);
+  }
+
+  /**
+   * Готовит текст к отправке: экранирование HTML (при `parse_mode: html`) и
+   * обрезка до лимита Telegram с многоточием. Обрезка не рвёт HTML-сущность.
+   */
+  private renderText(text: string): string {
+    const body = this.parseMode === 'html' ? escapeHtml(text) : text;
+    if (body.length <= TELEGRAM_MESSAGE_LIMIT) return body;
+    const cut = body.slice(0, TELEGRAM_MESSAGE_LIMIT - 1).replace(/&[a-zA-Z#0-9]*$/, '');
+    return `${cut}…`;
   }
 
   /** Обновляет `lastOutboundMessageId` в привязке чата. */
@@ -288,6 +657,27 @@ export class AgentWatcher {
       updatedAt: new Date().toISOString(),
     });
   }
+}
+
+/** Признак `retry_after` (сек) из ответа Telegram при 429. */
+function retryAfterMs(response: BotApiResponse<unknown>): number | undefined {
+  const parameters = response.parameters as { retry_after?: unknown } | undefined;
+  const retryAfter = parameters?.retry_after;
+  if (typeof retryAfter !== 'number' || !Number.isFinite(retryAfter) || retryAfter <= 0) {
+    return undefined;
+  }
+  return retryAfter * 1000;
+}
+
+/** Человекочитаемое описание ошибки Telegram-ответа (без секретов). */
+function describeBotError(response: BotApiResponse<unknown>): string {
+  const description = typeof response.description === 'string' ? response.description : undefined;
+  const code = response.error_code;
+  return description ?? (typeof code === 'number' ? `error_code=${code}` : 'unknown');
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function safeParse(payload: string): SseEvent | null {

@@ -77,6 +77,32 @@ export interface SendMessageParams {
   messageThreadId?: number;
 }
 
+/**
+ * Тип действия `sendChatAction` (по документации Bot API). В `@grammyjs/types`
+ * отдельного алиаса нет — тип локальный (минимальный конверт, как
+ * {@link BotApiResponse}).
+ */
+export type ChatAction =
+  | 'typing'
+  | 'upload_photo'
+  | 'record_video'
+  | 'upload_video'
+  | 'record_voice'
+  | 'upload_voice'
+  | 'upload_document'
+  | 'choose_sticker'
+  | 'find_location'
+  | 'record_video_note'
+  | 'upload_video_note';
+
+/** Параметры sendChatAction. */
+export interface SendChatActionParams {
+  chatId?: string | number;
+  action: ChatAction;
+  /** id топика форума (`message_thread_id`). */
+  messageThreadId?: number;
+}
+
 /** Параметры getUpdates (long-polling). */
 export interface GetUpdatesParams {
   /** Смещение: подтверждает апдейты с `update_id < offset`. */
@@ -204,6 +230,18 @@ export class TelegramClient {
     if (params.replyToMessageId !== undefined) payload.reply_to_message_id = params.replyToMessageId;
     if (params.messageThreadId !== undefined) payload.message_thread_id = params.messageThreadId;
     return this.call<Message>('sendMessage', payload);
+  }
+
+  /**
+   * Сообщает клиенту статус («Печатает…» и т. п.). Статус держится ~5 секунд
+   * либо сбрасывается приходящим сообщением — вызывать повторно, пока действие
+   * продолжается.
+   */
+  async sendChatAction(params: SendChatActionParams): Promise<BotApiResponse<boolean>> {
+    const chatId = this.resolveChatId(params.chatId);
+    const payload: Record<string, unknown> = { chat_id: chatId, action: params.action };
+    if (params.messageThreadId !== undefined) payload.message_thread_id = params.messageThreadId;
+    return this.call<boolean>('sendChatAction', payload);
   }
 
   /** Редактирует текст ранее отправленного сообщения. */

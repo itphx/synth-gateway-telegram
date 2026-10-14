@@ -25,8 +25,8 @@ Telegram Bot API                 synth-gateway-telegram                    Synth
                                   │   └─ /help /bind … ──▶ ответ в чат           │
                                   │                            Event/Binding/Router ядра
                                   │      SSE GET /events ◀── session events      │
-                                  └◀── watcher ── stream.done/message.added ────┘
-                                          └──▶ sendMessage (ответ агента в чат)
+                                  └◀── watcher ── stream.chunk/done/cancelled ──┘
+                                          └──▶ «Печатает…» + стриминг ответа в чат
                                   └── offset / seen / chatSessions / routes / sent ── FileStore
 ```
 

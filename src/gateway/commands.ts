@@ -25,7 +25,7 @@ export function parseCommand(text: string): ParsedCommand | null {
 }
 
 /** Команды, обрабатываемые шлюзом локально (не уходят в LLM). */
-export const LOCAL_COMMANDS = new Set(['help', 'start', 'status', 'bind', 'unbind', 'new']);
+export const LOCAL_COMMANDS = new Set(['help', 'start', 'status', 'stop', 'bind', 'unbind', 'new']);
 
 /** Команды, которые прокидываются в ядро как событие `type:'command'`. */
 export const AGENT_COMMANDS = new Set(['synth', 'idea']);

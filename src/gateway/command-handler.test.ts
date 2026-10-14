@@ -20,6 +20,7 @@ interface Mocks {
   deleteBinding: ReturnType<typeof vi.fn>;
   listBindings: ReturnType<typeof vi.fn>;
   getSession: ReturnType<typeof vi.fn>;
+  abortSession: ReturnType<typeof vi.fn>;
 }
 
 function makeMocks(): Mocks {
@@ -40,15 +41,27 @@ function makeMocks(): Mocks {
   const deleteBinding = vi.fn(async () => undefined);
   const listBindings = vi.fn(async () => [] as unknown[]);
   const getSession = vi.fn(async () => null as unknown);
+  const abortSession = vi.fn(async () => undefined);
   const synth = {
     createSession,
     createBinding,
     deleteBinding,
     listBindings,
     getSession,
+    abortSession,
   } as unknown as SynthEventsClient;
 
-  return { client, sendMessage, synth, createSession, createBinding, deleteBinding, listBindings, getSession };
+  return {
+    client,
+    sendMessage,
+    synth,
+    createSession,
+    createBinding,
+    deleteBinding,
+    listBindings,
+    getSession,
+    abortSession,
+  };
 }
 
 function commandEvent(
@@ -107,6 +120,38 @@ describe('CommandHandler', () => {
     const handled = await handler().handle(commandEvent('help'));
     expect(handled).toBe(true);
     expect(lastText()).toContain('/synth');
+    expect(lastText()).toContain('/stop');
+  });
+
+  it('/stop без привязки сообщает об отсутствии сессии', async () => {
+    const handled = await handler().handle(commandEvent('stop'));
+    expect(handled).toBe(true);
+    expect(mocks.abortSession).not.toHaveBeenCalled();
+    expect(lastText()).toContain('Нет активной сессии');
+  });
+
+  it('/stop прерывает сессию чата', async () => {
+    await store.setChatSession('chat:telegram:123456789', {
+      sessionId: 'sess_live',
+      chatId: '123456789',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const handled = await handler().handle(commandEvent('stop'));
+    expect(handled).toBe(true);
+    expect(mocks.abortSession).toHaveBeenCalledWith('sess_live');
+    expect(lastText()).toContain('Остановлено');
+  });
+
+  it('/stop с ошибкой abort → ⚠️, локально обработано', async () => {
+    await store.setChatSession('chat:telegram:123456789', {
+      sessionId: 'sess_live',
+      chatId: '123456789',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    mocks.abortSession.mockRejectedValueOnce(new Error('нет активного стрима'));
+    const handled = await handler().handle(commandEvent('stop'));
+    expect(handled).toBe(true);
+    expect(lastText()).toContain('⚠️');
   });
 
   it('/synth и /idea — pass-through в ядро (не обрабатываются локально)', async () => {

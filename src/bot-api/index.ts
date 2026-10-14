@@ -10,10 +10,12 @@ export type { JsonRequestOptions, JsonResponse, TelegramProxyAgent } from './tra
 export type {
   AnswerCallbackQueryParams,
   BotApiResponse,
+  ChatAction,
   DeleteMessageParams,
   EditMessageReplyMarkupParams,
   EditMessageTextParams,
   GetUpdatesParams,
+  SendChatActionParams,
   SendMessageParams,
   TelegramClientOptions,
 } from './client.js';

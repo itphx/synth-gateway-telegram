@@ -17,6 +17,7 @@ describe('parseCommand', () => {
       args: 'сделай задачу',
     });
     expect(parseCommand('/status')).toEqual({ name: 'status', args: '' });
+    expect(parseCommand('/stop')).toEqual({ name: 'stop', args: '' });
     expect(parseCommand('  /help  ')).toEqual({ name: 'help', args: '' });
   });
 
@@ -39,10 +40,11 @@ describe('parseCommand', () => {
 
 describe('наборы команд и права', () => {
   it('локальные/агентские/привязочные наборы согласованы', () => {
-    expect([...LOCAL_COMMANDS]).toEqual(['help', 'start', 'status', 'bind', 'unbind', 'new']);
+    expect([...LOCAL_COMMANDS]).toEqual(['help', 'start', 'status', 'stop', 'bind', 'unbind', 'new']);
     expect([...AGENT_COMMANDS]).toEqual(['synth', 'idea']);
     expect([...BINDING_COMMANDS]).toEqual(['bind', 'unbind', 'new']);
     expect(isLocalCommand('bind')).toBe(true);
+    expect(isLocalCommand('stop')).toBe(true);
     expect(isLocalCommand('synth')).toBe(false);
     expect(isAgentCommand('synth')).toBe(true);
     expect(isAgentCommand('idea')).toBe(true);

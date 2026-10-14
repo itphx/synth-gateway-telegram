@@ -177,6 +177,11 @@ export class SynthEventsClient {
     }
   }
 
+  /** Прерывает активный ответ агента в сессии (`POST /sessions/:id/abort`). */
+  async abortSession(id: string): Promise<void> {
+    await this.request<unknown>('POST', `/sessions/${encodeURIComponent(id)}/abort`);
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     let lastError: unknown;

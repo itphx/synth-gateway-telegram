@@ -123,6 +123,22 @@ describe('TelegramClient (dry-run)', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('dry-run sendChatAction подставляет chat_id, action и message_thread_id', async () => {
+    const fetchImpl = vi.fn();
+    const client = new TelegramClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const result = await client.sendChatAction({
+      chatId: '-1001234567890',
+      action: 'typing',
+      messageThreadId: 7,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.dryRun).toBe(true);
+    expect(result.chat_id).toBe('-1001234567890');
+    expect(result.action).toBe('typing');
+    expect(result.message_thread_id).toBe(7);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('dry-run editMessageReplyMarkup без replyMarkup снимает клавиатуру', async () => {
     const client = new TelegramClient({ dryRun: true, channelId: '42' });
     const result = await client.editMessageReplyMarkup({ messageId: 7 });
@@ -208,6 +224,30 @@ describe('TelegramClient (с токеном)', () => {
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, { body: string }];
     expect(url).toBe('https://api.telegram.org/bottest-token/answerCallbackQuery');
     expect(JSON.parse(init.body)).toEqual({ callback_query_id: 'cq', text: 't', show_alert: true });
+  });
+
+  it('sendChatAction делает POST в Bot API с action/message_thread_id', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, result: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const client = new TelegramClient({
+      token: 'test-token',
+      channelId: '42',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const result = await client.sendChatAction({ action: 'typing', messageThreadId: 7 });
+    expect(result.ok).toBe(true);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, { body: string }];
+    expect(url).toBe('https://api.telegram.org/bottest-token/sendChatAction');
+    expect(JSON.parse(init.body)).toEqual({
+      chat_id: '42',
+      action: 'typing',
+      message_thread_id: 7,
+    });
   });
 
   it('editMessageReplyMarkup делает POST с пустой клавиатурой', async () => {
