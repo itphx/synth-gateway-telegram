@@ -1,22 +1,27 @@
-# Add-on Synth: границы и основания
+# Gateway Synth: границы и основания
 
 > Краткая выжимка. Полные архитектурные решения — в основном репозитории Synth:
-> <https://gitverse.ru/itphx/synth> (AD-086, AD-089, AD-090).
-> Этот репозиторий — реализация первого add-on'а, Telegram-шлюза.
+> <https://gitverse.ru/itphx/synth> — AD-087 «Шлюзы», AD-089
+> (внешние события), AD-090 (Plugin ≠ Gateway ≠ Add-on ≠ Declarative),
+> AD-052 (service-key/scopes).
+> Этот репозиторий — реализация первого **Gateway** платформы, Telegram-шлюза.
 
-## Что такое add-on
+## Классы расширений Synth
 
-**Add-on** — внешний сервис-надстройка: отдельный процесс/контейнер со своим
-репозиторием, релизным циклом, образами и деплоем. Он общается с Synth
-исключительно по **публичным контрактам**: API v2, MCP и внешние события (AD-089).
+**Gateway** — **отдельный класс** расширения Synth (**не** add-on): внешний
+сервис-мост, связывающий Synth с внешним миром (мессенджеры, каналы, транспорт)
+по **публичным контрактам** — API v2, MCP и внешние события (AD-089). Классы
+разведены жёстко (AD-090) и не смешиваются:
 
-Классы расширений Synth разведены жёстко (AD-090) и не смешиваются:
-
-| Класс | Что запускается | Носитель | Доступ к internals |
+| Класс | Что запускается | Носитель | Пример |
 |---|---|---|---|
-| **Plugin** | код **в процессе core** | JS-бандл через Extension API | да (под permission-слоем) |
-| **Add-on** | **внешний сервис** в своём процессе | образ + compose/Helm | **нет** |
-| **Declarative** | ничего (данные) | файлы контента (скиллы, агенты, MCP-серверы, маршруты) | нет |
+| **Plugin** | код **в процессе core** | JS-бандл через Extension API | in-process расширение ядра |
+| **Gateway** | **внешний сервис-мост** в своём процессе | образ + compose/Helm | `synth-gateway-telegram` (этот репозиторий) |
+| **Add-on** | **внешний сервис иного назначения** в своём процессе | образ + compose/Helm | helper/интеграция |
+| **Контент-пак** | ничего (данные) | файлы контента (скиллы, агенты, MCP-серверы, маршруты) | `kind: "pack"` + `packType` (см. AD-090) |
+
+Единый манифест всех классов — **`synth.pack`** в корне репозитория; класс задаётся
+полем `kind` (`plugin` | `gateway` | `addon` | `pack`).
 
 ## Границы Telegram-шлюза
 
@@ -40,25 +45,25 @@
   `synth-gateway-telegram_<tool>`. Транспорты:
   - **stdio** (bin `synth-gateway-tg`) — локальный запуск движком;
   - **Streamable HTTP** (`--http`) — путь `/mcp/<tenantId>`, порт 7101;
-    в K3s используется именно он (движок не спавнит процесс add-on'а).
+    в K3s используется именно он (движок не спавнит процесс шлюза).
 - **Внешние события** (AD-089): тело `{ source, type, payload, identity, dedupKey }`;
   стабильный `dedupKey` обязателен.
 
 Детали конфигурации — [configuration.md](configuration.md), развёртывание —
 [deployment.md](deployment.md).
 
-## Манифест `provides` (`addon.json`)
+## Манифест `provides` (`synth.pack`)
 
-Манифест `addon.json` описывает совместимость (`name`/`version`/`kind: "addon"`/
-`host`/`contracts`) и секцию **`provides`** — какие ресурсы add-on умеет отдавать
+Манифест `synth.pack` описывает совместимость (`name`/`version`/`kind: "gateway"`/
+`host`/`contracts`) и секцию **`provides`** — какие ресурсы gateway отдаёт
 инстансу Synth. `{tenant}` — плейсхолдер, подставляется инсталлятором
 (`--tenant`).
 
 ```json
 {
   "name": "@itphx/synth-gateway-telegram",
-  "version": "0.2.0",
-  "kind": "addon",
+  "version": "0.3.0",
+  "kind": "gateway",
   "host": "^0.9.0",
   "contracts": { "apiV2": "^2", "events": "^1", "mcp": "^1" },
   "provides": {
@@ -108,9 +113,9 @@ curl -s -X POST http://127.0.0.1:7101/mcp/dev \
 
 ## Авто-установка ресурсов (`provides` → инстанс)
 
-Add-on сам регистрирует свои ресурсы в инстансе — референсный инсталлятор
+Шлюз сам регистрирует свои ресурсы в инстансе — референсный инсталлятор
 `scripts/install-into-synth.mjs` (логика — `src/installer/install.ts`) читает
-`addon.json.provides` и работает в двух режимах:
+`synth.pack.provides` и работает в двух режимах:
 
 | Режим | Как включается | Что делает |
 |---|---|---|
@@ -120,7 +125,7 @@ Add-on сам регистрирует свои ресурсы в инстанс
 Поле `origin` записи реестра инсталлятор **не отправляет** — это серверная деталь
 (AD-071): схема допускает только `instance|user`, и для installer-ключа (service-key)
 инстанс сам помечает запись как `instance`. Клиентское значение с префиксом
-add-on'а дало бы `400 invalid_enum_value`.
+шлюза дало бы `400 invalid_enum_value`.
 
 Аргументы: `--synth-url`, `--token`, `--tenant`, `--mcp-url` **или**
 `--service-host` (URL MCP собирается как `http://<host>:<provides.mcp.port><path>`),
@@ -142,7 +147,7 @@ add-on'а дало бы `400 invalid_enum_value`.
 выбранных сущностей). В кластере инсталлятор запускается hook-Job'ом чарта
 (`autoInstall`, см. [deployment.md](deployment.md)).
 
-## Три вида аддонов
+## Три вида конфигураций шлюза
 
 | Вид | Конфигурация | Что делает инсталлятор |
 |---|---|---|
@@ -150,12 +155,12 @@ add-on'а дало бы `400 invalid_enum_value`.
 | **только MCP** (агент вызывает тулы, чат не подключён) | `autoInstall.enabled=true`, `autoInstall.mcp=true`, `autoInstall.skills=false` | регистрирует только запись MCP-реестра |
 | **только скиллы** (инструкции агенту без запуска сервиса) | `mcp.enabled=false`, `autoInstall.enabled=true`, `autoInstall.mcp=false`, `autoInstall.skills=true` | ставит только скилл |
 
-Для аддонов **без образа** предусмотрены `autoInstall.image` (образ с node) +
+Для конфигураций **без образа** предусмотрены `autoInstall.image` (образ с node) +
 `autoInstall.scriptConfigMap` (ConfigMap с `install-into-synth.mjs`) +
 `autoInstall.skillsFromConfigMap` (файлы скиллов в values).
 
 ## Совместимость
 
-Манифест `addon.json` в корне фиксирует `name`/`version`/`kind: "addon"`/`host` и
+Манифест `synth.pack` в корне фиксирует `name`/`version`/`kind: "gateway"`/`host` и
 диапазоны контрактов `apiV2`/`events`/`mcp` (semver). `host` и `contracts`
 проверяются при подключении к инстансу Synth.

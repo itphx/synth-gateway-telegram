@@ -1,7 +1,7 @@
 {
   "name": "@itphx/synth-gateway-telegram",
-  "version": "0.2.0",
-  "kind": "addon",
+  "version": "0.3.0",
+  "kind": "gateway",
   "host": "^0.9.0",
   "contracts": {
     "apiV2": "^2",

@@ -1,19 +1,20 @@
 # synth-gateway-telegram — соглашения репозитория
 
 > Короткий рабочий контракт для агентов. Назначение и поток данных — [README.md](./README.md),
-> границы add-on'а — [docs/addon.md](./docs/addon.md), конфигурация —
+> границы шлюза — [docs/gateway.md](./docs/gateway.md), конфигурация —
 > [docs/configuration.md](./docs/configuration.md). Язык — русский. Коммит — только
 > по явной просьбе пользователя; новые зависимости — с разрешения.
 
 ## Что это
 
-Один npm-пакет (**не** pnpm-workspace) — внешний сервис-надстройка (add-on) Synth:
+Один npm-пакет (**не** pnpm-workspace) — внешний сервис-мост (Gateway) Synth:
 Telegram-бот ↔ платформа внешних событий (`POST /api/v2/events`, AD-089).
-Основание — AD-086 (внешние сервисы-надстройки) и AD-090 (Plugin ≠ Add-on ≠ Declarative).
+Основание — AD-086 (классы расширений), AD-087 (Gateway — шлюзы) и AD-090
+(Plugin ≠ Gateway ≠ Add-on ≠ Declarative).
 
 ## Инварианты (не нарушать)
 
-1. **Add-on — не плагин.** Нет монтирования в процесс core, нет Extension API/hooks.
+1. **Gateway — не плагин.** Нет монтирования в процесс core, нет Extension API/hooks.
 2. **LLM внутрь сервиса не тянем.** Понимание/генерация — движок Synth; шлюз —
    детерминированный транспорт событий.
 3. **Конфиг** — приоритет CLI-флаг > env > `secrets/` > дефолт; пустая/whitespace
@@ -86,7 +87,7 @@ scripts/       # install-into-synth.mjs — обёртка инсталлято�
   (`--http --port 7101`) — кластер: контекст инструментов берётся из
   `tenants.json` **тенанта** (`/mcp/<tenantId>`, неизвестный → 404), токен —
   `GATEWAY_MCP_TOKEN`/`secrets/mcp_token` (нет/неверный → 401).
-- **`provides` в `addon.json`** — контракт с инсталлятором: `mcp`
+- **`provides` в `synth.pack`** — контракт с инсталлятором: `mcp`
   (name/transport/port/`path: /mcp/{tenant}`) и `skills`
   (`{name, path}`); `{tenant}` подставляется `--tenant`.
 - **Чарт** (`charts/synth-gateway-telegram`): MCP-контейнер в том же поде
@@ -100,7 +101,7 @@ scripts/       # install-into-synth.mjs — обёртка инсталлято�
   `helm upgrade` через `lookup`, `resource-policy: keep`), тот же Secret читает
   контейнер `mcp` (`GATEWAY_MCP_TOKEN`) и hook-Job (`SYNTH_MCP_TOKEN`), а
   инсталлятор пишет `config.headers.Authorization` в create- и update-ветках.
-- **Образ** (`docker/Dockerfile`) содержит `addon.json`, `skills/` и
+- **Образ** (`docker/Dockerfile`) содержит `synth.pack`, `skills/` и
   `scripts/install-into-synth.mjs` — они нужны hook-Job'у; ENTRYPOINT сервиса
   при этом не меняется. После копирования runtime-стадия выравнивает права
   (`chmod -R a+rX`): под работает под uid 1000 (не root), а чек-аут/`COPY` может
@@ -109,7 +110,7 @@ scripts/       # install-into-synth.mjs — обёртка инсталлято�
 ## Релиз и публикация
 
 Версия — единый источник истины **git-тег** `vX.Y.Z`. Перед тегом
-`scripts/version-bump.sh X.Y.Z` синхронизирует `package.json`, `addon.json` и
+`scripts/version-bump.sh X.Y.Z` синхронизирует `package.json`, `synth.pack` и
 `charts/synth-gateway-telegram/Chart.yaml` (`version` + `appVersion`). CI-пайплайн
 `.gitverse/workflows/release.yaml` (триггер — тег `v*` либо ручной
 `workflow_dispatch` с `dry_run`) прогоняет проверки (build/typecheck/lint/test) и
@@ -126,7 +127,7 @@ Go-шаблон GitVerse CI).
 
 | Тема | Файл |
 |---|---|
-| Назначение, поток данных | `README.md`, `docs/addon.md` |
+| Назначение, поток данных | `README.md`, `docs/gateway.md` |
 | Конфиг / секреты / мультитенантность | `docs/configuration.md`, `src/gateway/config.ts` |
 | Деплой (docker/compose/K8s/Helm) | `docs/deployment.md` |
 | Аутентификация Synth API (service-key/OIDC/ключ) | `src/gateway/auth.ts` |
@@ -142,6 +143,6 @@ Go-шаблон GitVerse CI).
 | MCP-тулы (`tg_*`) | `src/mcp/server.ts`, `src/mcp/tools.ts` |
 | MCP по HTTP (тенант-роутинг, auth) | `src/mcp/http.ts`, `src/mcp/index.ts` |
 | `tg_send_to_user` / резолв пользователя Synth | `src/mcp/user-lookup.ts` |
-| Авто-установка ресурсов (`provides`) | `src/installer/install.ts`, `scripts/install-into-synth.mjs`, `addon.json` |
+| Авто-установка ресурсов (`provides`) | `src/installer/install.ts`, `scripts/install-into-synth.mjs`, `synth.pack` |
 | Чарт: MCP-контейнер, hook-Job | `charts/synth-gateway-telegram/templates/{deployment,service,install-job}.yaml`, `values.yaml` |
 | Скилл агента | `skills/gateway-telegram/SKILL.md` |

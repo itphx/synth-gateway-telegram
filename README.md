@@ -1,6 +1,6 @@
 # synth-gateway-telegram
 
-**Telegram-шлюз** — внешний сервис-надстройка (**add-on**) агентной платформы
+**Telegram-шлюз** — внешний сервис-мост (**Gateway**) агентной платформы
 [Synth](https://gitverse.ru/itphx/synth): мост между Telegram-ботом и платформой
 внешних событий (AD-089). Шлюз принимает апдейты бота (long-polling), нормализует
 их во внешние события Synth и публикует в `POST /api/v2/events`, а ответы агента
@@ -8,14 +8,14 @@
 
 ## Что это и чем НЕ является
 
-- ✅ **Add-on** — внешний сервис со своим репозиторием, образами и деплоем;
+- ✅ **Gateway** — внешний сервис-мост со своим репозиторием, образами и деплоем;
   общается с Synth только по публичным контрактам (API v2, MCP, внешние события).
 - ❌ **Не плагин**: не монтируется в процесс ядра, точек расширения Extension API
-  не имеет (AD-090). Терминология жёсткая — Plugin ≠ Add-on ≠ Declarative.
+  не имеет (AD-090). Терминология жёсткая — Plugin ≠ Gateway ≠ Add-on ≠ Declarative.
 - ❌ **LLM внутрь сервиса не тянется**: понимание и генерацию делает движок Synth,
   шлюз лишь детерминированно транспортирует события.
 
-Основания и границы — [docs/addon.md](docs/addon.md).
+Основания и границы — [docs/gateway.md](docs/gateway.md).
 
 ## Поток данных
 
@@ -60,7 +60,7 @@ Telegram Bot API                 synth-gateway-telegram                    Synth
 | Транспорт | Когда | Запуск |
 |---|---|---|
 | **stdio** (bin `synth-gateway-tg`) | локальный dev, движок спавнит процесс | `node dist/mcp/index.js` |
-| **Streamable HTTP** (`--http`) | кластер/K3s (движок не спавнит процесс add-on'а) | `node dist/mcp/index.js --http --port 7101` |
+| **Streamable HTTP** (`--http`) | кластер/K3s (движок не спавнит процесс шлюза) | `node dist/mcp/index.js --http --port 7101` |
 
 HTTP-режим: путь `/mcp/<tenantId>` (тенанты — из `tenants.json`, неизвестный →
 404), `GET /health` без auth, остальное — `Authorization: Bearer
@@ -69,7 +69,7 @@ HTTP-режим: путь `/mcp/<tenantId>` (тенанты — из `tenants.js
 
 ## Авто-установка MCP и скиллов
 
-`addon.json` описывает секцию **`provides`** (MCP-сервер + скиллы), а
+`synth.pack` описывает секцию **`provides`** (MCP-сервер + скиллы), а
 `scripts/install-into-synth.mjs` **идемпотентно** регистрирует их в инстансе:
 managed — через API v2 (`/mcp/registry`, `/skills*`), standalone — merge
 `mcp.servers` в `config.yaml` + копирование скиллов в `{dataDir}/skills`.
@@ -85,7 +85,7 @@ node scripts/install-into-synth.mjs --synth-url http://127.0.0.1:5000/api/v2 \
   --tenant dev --service-host 127.0.0.1 --dry-run
 ```
 
-Контракт `provides`, три вида аддонов и HTTP-MCP — [docs/addon.md](docs/addon.md);
+Контракт `provides`, три вида конфигураций шлюза и HTTP-MCP — [docs/gateway.md](docs/gateway.md);
 values, Secret и проверка — [docs/deployment.md](docs/deployment.md) §«Авто-установка
 MCP и скиллов».
 
@@ -138,7 +138,7 @@ cp .env.example .env && docker compose up --build
 
 ```text
 synth-gateway-telegram/
-├── addon.json       # манифест add-on'а (kind/host/contracts) + `provides` (mcp, skills)
+├── synth.pack       # манифест шлюза (kind/host/contracts) + `provides` (mcp, skills)
 ├── src/
 │   ├── gateway/     # сервис synth-gateway-telegram (bin): поллер, нормализация, ingest, watcher, health
 │   │                #   markdown.ts — Markdown → Telegram-HTML; inbound.ts — InboundRegistry (reply-адресат)
@@ -150,7 +150,7 @@ synth-gateway-telegram/
 ├── charts/synth-gateway-telegram/    # Helm-чарт (MCP-контейнер, hook-Job авто-установки)
 ├── docker/ · docker-compose.yml · .env.example
 ├── examples/        # примеры Secret (сервис, installer-ключ) и tenants.json
-├── docs/            # configuration.md · deployment.md · addon.md
+├── docs/            # configuration.md · deployment.md · gateway.md
 ├── skills/gateway-telegram/SKILL.md  # скилл AD-046 для агента
 └── .gitverse/workflows/  # ci.yaml (push/PR) · release.yaml (Docker + Helm + Release по тегу v*)
 ```

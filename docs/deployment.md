@@ -1,8 +1,8 @@
 # Развёртывание Telegram-шлюза
 
-> Docker, docker compose, Kubernetes и Helm для add-on'а `synth-gateway-telegram`.
-> Переменные и секреты — [configuration.md](configuration.md); границы add-on'а —
-> [addon.md](addon.md).
+> Docker, docker compose, Kubernetes и Helm для шлюза `synth-gateway-telegram`.
+> Переменные и секреты — [configuration.md](configuration.md); границы шлюза —
+> [gateway.md](gateway.md).
 
 ## Публикуемые артефакты
 
@@ -114,7 +114,7 @@ helm upgrade --install synth-gateway-telegram charts/synth-gateway-telegram \
   инстанс Synth подключается по `http://<fullname>:7101/mcp/<tenantId>`.
   Требуется токен: ключ `GATEWAY_MCP_TOKEN` в `mcp.tokenSecretName` (или в
   `existingSecret`); без токена контейнер не стартует (fail-fast).
-  `mcp.port` должен совпадать с `provides.mcp.port` в `addon.json`.
+  `mcp.port` должен совпадать с `provides.mcp.port` в `synth.pack`.
 
 Пример Secret — `examples/secret.yaml` (обычный Secret, без Helm-шаблонизации):
 
@@ -124,12 +124,12 @@ kubectl -n synth apply -f examples/secret.yaml
 
 ## Авто-установка MCP и скиллов
 
-Add-on сам регистрирует свои ресурсы в инстансе Synth: hook-Job
+Шлюз сам регистрирует свои ресурсы в инстансе Synth: hook-Job
 (`templates/install-job.yaml`, `post-install,post-upgrade`) запускает
 референсный инсталлятор `scripts/install-into-synth.mjs` — он читает
-`addon.json.provides` и **идемпотентно** создаёт/обновляет запись реестра
+`synth.pack.provides` и **идемпотентно** создаёт/обновляет запись реестра
 MCP-серверов и скилл (повторный `helm upgrade` не плодит дубликаты). Контракт
-`provides` и три вида аддонов — [addon.md](addon.md).
+`provides` и три вида аддонов — [gateway.md](gateway.md).
 
 ### Values
 
@@ -142,7 +142,7 @@ autoInstall:
   installerSecretKey: "token"         # ключ внутри Secret
   mcp: true                           # ставить MCP-сервер (по provides.mcp)
   skills: true                        # ставить скиллы (по provides.skills)
-  image: ""                           # пусто — образ чарта (addon.json/skills/scripts внутри)
+  image: ""                           # пусто — образ чарта (synth.pack/skills/scripts внутри)
   backoffLimit: 3
   # — служебное —
   scriptPath: "scripts/install-into-synth.mjs"  # путь к инсталлятору в образе

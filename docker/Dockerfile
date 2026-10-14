@@ -1,5 +1,5 @@
 # ============================================================================
-# Образ Telegram-шлюза Synth (add-on).
+# Образ Telegram-шлюза Synth (класс Gateway).
 # Multi-stage: сборка одного пакета → тонкий runtime с prod-зависимостями.
 # Базовый образ — node:22-alpine (как у прочих сервисов Synth).
 # ============================================================================
@@ -38,7 +38,7 @@ COPY --from=builder /src/dist ./dist
 # Артефакты авто-установки (hook-Job чарта `autoInstall`): манифест `provides`,
 # референсный инсталлятор и скиллы. Нужны образу, даже когда сервис не запускается
 # (аддон «только MCP/скиллы»): `node scripts/install-into-synth.mjs …`.
-COPY addon.json ./
+COPY synth.pack ./
 COPY scripts/install-into-synth.mjs ./scripts/
 COPY skills ./skills
 
@@ -49,7 +49,7 @@ COPY skills ./skills
 # в hook-Job. Даём всем на чтение (`a+r`) и на обход каталогов (`X` — только
 # каталоги/уже исполняемые файлы); владелец остаётся root, uid 1000 хватает
 # прав на чтение. `dist` — из builder-стадии (там права зависят от umask сборки).
-RUN chmod -R a+rX /app/addon.json /app/skills /app/scripts /app/dist \
+RUN chmod -R a+rX /app/synth.pack /app/skills /app/scripts /app/dist \
  && chmod a+r /app/package.json /app/pnpm-lock.yaml
 
 # JSON-хранилище (offset/дедуп/привязки чатов; монтируется volume'ом).

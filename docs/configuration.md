@@ -1,9 +1,9 @@
 # Конфигурация Telegram-шлюза
 
-> Единственный справочник по конфигурации add-on'а. Здесь: переменные окружения,
+> Единственный справочник по конфигурации шлюза. Здесь: переменные окружения,
 > CLI-флаги, секрет-файлы, приоритеты, режимы аутентификации Synth API, прокси,
 > доверие внутреннему CA и мультитенантность (`tenants.json`).
-> Ссылки: [README](../README.md) · [deployment](deployment.md) · [add-on](addon.md).
+> Ссылки: [README](../README.md) · [deployment](deployment.md) · [Gateway](gateway.md).
 
 ## Приоритет значений
 
@@ -155,14 +155,14 @@ node scripts/install-into-synth.mjs \
   [--config PATH] [--data-dir DIR] [--root DIR] [--dry-run] [--help]
 ```
 
-`--mcp-token` (env `SYNTH_MCP_TOKEN`) — bearer-токен MCP-клиентов add-on'а: уходит
+`--mcp-token` (env `SYNTH_MCP_TOKEN`) — bearer-токен MCP-клиентов шлюза: уходит
 в `config.headers.Authorization` записи реестра (ядро пробрасывает `headers` в
 MCP-клиент, без него подключение к HTTP-MCP шлюза получит 401). По умолчанию
 ставится `enabledByDefault: true` — сервер включён для новых проектов
 (`--no-enabled-by-default` снимает). Токены в лог не печатаются.
 
 Подробности и примеры — [deployment.md](deployment.md) §«Авто-установка MCP и
-скиллов», контракт `provides` — [addon.md](addon.md).
+скиллов», контракт `provides` — [gateway.md](gateway.md).
 
 ## Секрет-файлы
 

@@ -1,7 +1,7 @@
 /**
- * Инсталлятор MCP-сервера и скиллов add-on'а в инстанс Synth.
+ * Инсталлятор MCP-сервера и скиллов шлюза в инстанс Synth.
  *
- * Зачем: add-on отдаёт MCP по HTTP и поставляет скилл — их надо зарегистрировать
+ * Зачем: шлюз отдаёт MCP по HTTP и поставляет скилл — их надо зарегистрировать
  * в инстансе Synth. Делается это идемпотентно, двумя путями:
  *
  * - **managed** (`--synth-url` + `--token`, машинная креда со scopes
@@ -13,7 +13,7 @@
  *   `mcp.servers` в config.yaml и копирование каталога скилла в
  *   `{dataDir}/skills/<name>/` (при доступном API — `POST /skills/reload`).
  *
- * Контракт `provides` берётся из `addon.json`; `{tenant}` в `provides.mcp.path`
+ * Контракт `provides` берётся из `synth.pack`; `{tenant}` в `provides.mcp.path`
  * подставляется значением `--tenant`.
  *
  * Идемпотентность: повторный прогон не создаёт дублей и не ломает настройки
@@ -26,7 +26,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** Каталог репозитория add-on'а (по умолчанию). */
+/** Каталог репозитория шлюза (по умолчанию). */
 const DEFAULT_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 /** Ошибка инсталлятора (понятное сообщение; код возврата ≠ 0). */
@@ -54,17 +54,17 @@ export interface AddonMcpProvides {
 /** Скилл-часть манифеста `provides`. */
 export interface AddonSkillProvides {
   name: string;
-  /** Относительный путь каталога скилла в репозитории add-on'а. */
+  /** Относительный путь каталога скилла в репозитории шлюза. */
   path: string;
 }
 
-/** Секция `provides` манифеста `addon.json`. */
+/** Секция `provides` манифеста `synth.pack`. */
 export interface AddonProvides {
   mcp?: AddonMcpProvides;
   skills?: AddonSkillProvides[];
 }
 
-/** Манифест add-on'а (срез, нужный инсталлятору). */
+/** Манифест шлюза (срез, нужный инсталлятору). */
 export interface AddonManifest {
   name?: string;
   version?: string;
@@ -93,7 +93,7 @@ export interface InstallerResult {
 
 /** Опции прогона инсталлятора (после разбора аргументов). */
 export interface InstallerOptions {
-  /** Корень репозитория add-on'а (где `addon.json`). */
+  /** Корень репозитория шлюза (где `synth.pack`). */
   rootDir?: string;
   /** Тенант — подстановка в `provides.mcp.path`. */
   tenant?: string;
@@ -101,17 +101,17 @@ export interface InstallerOptions {
   synthUrl?: string;
   /** Машинный токен (service-key со scope `addons:install`). */
   token?: string;
-  /** Базовый URL MCP-эндпоинта add-on'а (без пути тенанта). */
+  /** Базовый URL MCP-эндпоинта шлюза (без пути тенанта). */
   mcpUrl?: string;
   /**
-   * Хост сервиса add-on'а в кластере (`--service-host`): из него собирается
+   * Хост сервиса шлюза в кластере (`--service-host`): из него собирается
    * базовый URL MCP (`http://<host>:<provides.mcp.port>`) — общий контракт с
    * hook-Job'ом чарта (`serviceHost` → `--service-host`).
    */
   serviceHost?: string;
   /**
    * Корень каталога скиллов (`--skills-dir`): скиллы читаются как
-   * `<skillsDir>/<provides.skills[].name>` — для аддонов без образа, где файлы
+   * `<skillsDir>/<provides.skills[].name>` — для шлюзов без образа, где файлы
    * монтируются из ConfigMap.
    */
   skillsDir?: string;
@@ -122,7 +122,7 @@ export interface InstallerOptions {
   /** Только показать план, ничего не менять. */
   dryRun?: boolean;
   /**
-   * Bearer-токен MCP-клиентов add-on'а (`--mcp-token` / env `SYNTH_MCP_TOKEN`):
+   * Bearer-токен MCP-клиентов шлюза (`--mcp-token` / env `SYNTH_MCP_TOKEN`):
    * уходит в `config.headers.Authorization` записи реестра (ядро пробрасывает
    * `headers` в MCP-клиент). В логи не пишется.
    */
@@ -150,11 +150,11 @@ function describeUnknown(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Читает и валидирует `addon.json` (понятные ошибки на отсутствие/битый JSON). */
+/** Читает и валидирует `synth.pack` (понятные ошибки на отсутствие/битый JSON). */
 export function readAddonManifest(rootDir: string): AddonManifest {
-  const path = join(rootDir, 'addon.json');
+  const path = join(rootDir, 'synth.pack');
   if (!existsSync(path)) {
-    throw new InstallerError(`не найден манифест add-on'а: ${path}`);
+    throw new InstallerError(`не найден манифест шлюза: ${path}`);
   }
   let parsed: unknown;
   try {
@@ -483,7 +483,7 @@ async function installMcpManaged(
   const config = buildMcpServerConfig(
     options,
     mcpUrl,
-    mcp.description ?? `Add-on ${manifest.name ?? mcp.name}`,
+    mcp.description ?? `Шлюз ${manifest.name ?? mcp.name}`,
   );
   const client = {
     synthUrl: options.synthUrl!,
@@ -692,7 +692,7 @@ export async function runInstaller(options: InstallerOptions): Promise<Installer
 
   if ((options.mcp === true || options.skills === true) && !wantMcp && !wantSkills) {
     throw new InstallerError(
-      'в addon.json.provides нет выбранных сущностей (mcp/skills) — нечего устанавливать',
+      'в synth.pack.provides нет выбранных сущностей (mcp/skills) — нечего устанавливать',
     );
   }
 
@@ -735,7 +735,7 @@ export async function runInstaller(options: InstallerOptions): Promise<Installer
         result.mcp = { action: 'planned' };
       } else {
         throw new InstallerError(
-          'не задан --mcp-url (базовый URL MCP-эндпоинта add-on\'а, например http://synth-gateway-telegram:7101)',
+          'не задан --mcp-url (базовый URL MCP-эндпоинта шлюза, например http://synth-gateway-telegram:7101)',
         );
       }
     } else if (standaloneConfig) {
@@ -960,20 +960,20 @@ export function installerHelp(): string {
     '  --synth-url URL  базовый URL API v2 инстанса Synth (env SYNTH_URL)',
     '  --token TOKEN    машинный ключ (service-key, scope addons:install; env SYNTH_INSTALL_TOKEN)',
     '  --tenant ID      тенант: подставляется в provides.mcp.path вместо {tenant} (env SYNTH_ADDON_TENANT)',
-    '  --mcp-url URL    базовый URL MCP-эндпоинта add-on\'а (env SYNTH_ADDON_MCP_URL)',
-    '  --service-host H хост сервиса add-on\'а: MCP-URL собирается как http://H:<provides.mcp.port>',
+    '  --mcp-url URL    базовый URL MCP-эндпоинта шлюза (env SYNTH_ADDON_MCP_URL)',
+    '  --service-host H хост сервиса шлюза: MCP-URL собирается как http://H:<provides.mcp.port>',
     '                   (общий контракт с чартом; env SYNTH_ADDON_SERVICE_HOST)',
     '  --only LIST      что устанавливать: mcp,skills (по умолчанию — всё из provides)',
     '  --mcp / --skills синонимы-фильтры для --only',
-    '  --skills-dir DIR корень дерева скиллов (аддон без образа; env SYNTH_ADDON_SKILLS_DIR)',
-    '  --mcp-token TOK  bearer-токен MCP-клиентов add-on\'а → config.headers.Authorization',
+    '  --skills-dir DIR корень дерева скиллов (шлюз без образа; env SYNTH_ADDON_SKILLS_DIR)',
+    '  --mcp-token TOK  bearer-токен MCP-клиентов шлюза → config.headers.Authorization',
     '                   записи реестра (env SYNTH_MCP_TOKEN; в логи не попадает)',
     '  --no-enabled-by-default  не включать MCP-сервер по умолчанию для новых',
     '                   проектов (по умолчанию enabledByDefault: true)',
     '  --dry-run        показать план, ничего не менять',
     '  --config PATH    standalone: merge mcp.servers в config.yaml (env SYNTH_CONFIG)',
     '  --data-dir DIR   standalone: копировать скиллы в {dataDir}/skills (env SYNTH_DATA_DIR)',
-    '  --root DIR       корень репозитория add-on\'а с addon.json',
+    '  --root DIR       корень репозитория шлюза с synth.pack',
     '  --help, -h       эта справка',
     '',
     'Идемпотентно: повторный запуск не создаёт дублей (обновление вместо создания).',

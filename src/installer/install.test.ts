@@ -30,11 +30,11 @@ function tmpDir(prefix: string): string {
   return dir;
 }
 
-/** Фикстур-репозиторий add-on'а: addon.json + скилл. */
+/** Фикстур-репозиторий шлюза: synth.pack + скилл. */
 function fixtureRoot(options: { skills?: boolean } = {}): string {
   const root = tmpDir('gateway-installer-');
   writeFileSync(
-    join(root, 'addon.json'),
+    join(root, 'synth.pack'),
     JSON.stringify({
       name: '@itphx/synth-gateway-telegram',
       version: '0.2.0',
@@ -101,7 +101,7 @@ const MANAGED = {
 };
 
 describe('readAddonManifest', () => {
-  it('читает реальный addon.json репозитория (provides.mcp + skills)', () => {
+  it('читает реальный synth.pack репозитория (provides.mcp + skills)', () => {
     const manifest = readAddonManifest(process.cwd());
     expect(manifest.name).toBe('@itphx/synth-gateway-telegram');
     expect(manifest.provides?.mcp).toMatchObject({
@@ -120,11 +120,11 @@ describe('readAddonManifest', () => {
     expect(() => readAddonManifest(empty)).toThrow(/не найден манифест/);
 
     const broken = tmpDir('gateway-installer-broken-');
-    writeFileSync(join(broken, 'addon.json'), '{ не json');
+    writeFileSync(join(broken, 'synth.pack'), '{ не json');
     expect(() => readAddonManifest(broken)).toThrow(/некорректный JSON/);
 
     const noName = tmpDir('gateway-installer-noname-');
-    writeFileSync(join(noName, 'addon.json'), JSON.stringify({ provides: { mcp: {} } }));
+    writeFileSync(join(noName, 'synth.pack'), JSON.stringify({ provides: { mcp: {} } }));
     expect(() => readAddonManifest(noName)).toThrow(/provides\.mcp\.name/);
   });
 });
@@ -734,7 +734,7 @@ describe('ошибки конфигурации инсталлятора', () =>
 
   it('--mcp без provides.mcp → нечего устанавливать', async () => {
     const root = tmpDir('gateway-installer-nomp-');
-    writeFileSync(join(root, 'addon.json'), JSON.stringify({ provides: {} }));
+    writeFileSync(join(root, 'synth.pack'), JSON.stringify({ provides: {} }));
     await expect(
       runInstaller({ ...MANAGED, rootDir: root, mcp: true, skills: false, fetchImpl: mockFetch({}).fetchImpl, log: () => {} }),
     ).rejects.toThrow(/нечего устанавливать/);
@@ -899,7 +899,7 @@ describe('parseInstallerArgs / main', () => {
   it('isDirectory различает файл и каталог', () => {
     const root = fixtureRoot();
     expect(isDirectory(root)).toBe(true);
-    expect(isDirectory(join(root, 'addon.json'))).toBe(false);
+    expect(isDirectory(join(root, 'synth.pack'))).toBe(false);
     expect(isDirectory(join(root, 'nope'))).toBe(false);
   });
 });

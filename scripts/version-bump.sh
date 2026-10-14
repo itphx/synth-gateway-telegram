@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# version-bump.sh — синхронизирует версию add-on'а в трёх местах:
+# version-bump.sh — синхронизирует версию шлюза в трёх местах:
 #   - package.json            (version)
-#   - addon.json              (version)
+#   - synth.pack              (version)
 #   - charts/.../Chart.yaml   (version + appVersion)
 #
 # Версия — единый источник истины: git-тег vX.Y.Z. Перед созданием тега запустите
@@ -28,12 +28,12 @@ fi
 NEW="$NEW" node -e "
 const fs = require('fs');
 const v = process.env.NEW;
-for (const f of ['package.json', 'addon.json']) {
+for (const f of ['package.json', 'synth.pack']) {
   const j = JSON.parse(fs.readFileSync(f, 'utf8'));
   j.version = v;
   fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
 }
-console.log('Обновлено: package.json, addon.json → ' + v);
+console.log('Обновлено: package.json, synth.pack → ' + v);
 "
 
 NEW="$NEW" node -e "

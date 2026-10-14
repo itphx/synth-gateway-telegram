@@ -1,6 +1,6 @@
 name: Release
 
-# Релиз add-on'а synth-gateway-telegram: проверки → Docker-образ → Helm-чарт → GitVerse Release.
+# Релиз шлюза synth-gateway-telegram: проверки → Docker-образ → Helm-чарт → GitVerse Release.
 #
 # Триггеры:
 #   - push тега vX.Y.Z (или vX.Y.Z-pre): версия берётся из тега;

@@ -1,6 +1,6 @@
 ---
 name: gateway-telegram
-description: Уведомления и сообщения в Telegram через Telegram-шлюз Synth (add-on synth-gateway-telegram). Используй, когда нужно уведомить владельца, отправить/поправить/удалить сообщение в чате или показать inline-кнопки; а также при работе с входящими Telegram-событиями (source telegram).
+description: Уведомления и сообщения в Telegram через Telegram-шлюз Synth (synth-gateway-telegram). Используй, когда нужно уведомить владельца, отправить/поправить/удалить сообщение в чате или показать inline-кнопки; а также при работе с входящими Telegram-событиями (source telegram).
 ---
 
 # gateway-telegram — мост в Telegram
@@ -72,7 +72,7 @@ long-polling Telegram → нормализация → **`POST /api/v2/events`**
 ## Запуск (dev)
 
 ```bash
-# из корня репозитория add-on'а
+# из корня репозитория шлюза
 pnpm build
 node dist/mcp/index.js --help
 

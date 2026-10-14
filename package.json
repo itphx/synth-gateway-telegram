@@ -1,10 +1,10 @@
 {
   "name": "@itphx/synth-gateway-telegram",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "Telegram-шлюз: внешний сервис-надстройка (add-on) Synth, мост между Telegram-ботом и платформой внешних событий",
+  "description": "Telegram-шлюз Synth: мост между Telegram-ботом и платформой внешних событий",
   "engines": {
     "node": ">=22.0.0"
   },

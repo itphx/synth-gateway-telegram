@@ -59,9 +59,9 @@ Persistent-хранилище (data-dir):
   persistence.enabled=false — данные эфемерны (каталог контейнера).
 {{- end }}
 
-Внимание: add-on — внешний сервис, а не плагин. Он общается с Synth по API v2,
+Внимание: шлюз — внешний сервис, а не плагин. Он общается с Synth по API v2,
 MCP и внешним событиям; точек расширения Extension API у него нет
-(AD-086/AD-090, см. docs/addon.md).
+(AD-086/AD-090, см. docs/gateway.md).
 
 {{- if .Values.autoInstall.enabled }}
 

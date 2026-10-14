@@ -53,7 +53,7 @@ export interface TenantConfig {
 }
 
 /**
- * Конфигурация процесса Telegram-шлюза (add-on `@itphx/synth-gateway-telegram`).
+ * Конфигурация процесса Telegram-шлюза (Gateway `@itphx/synth-gateway-telegram`).
  *
  * Глобальные поля (`telegram`/`synth`/`allowlist`/`parseMode`/`unknownAction`/
  * `watch`/таймауты) — **дефолты** для тенантов: в legacy-режиме (без
@@ -62,7 +62,7 @@ export interface TenantConfig {
  */
 export interface GatewayConfig {
   version: string;
-  /** Корень репозитория add-on'а (для дефолтов data/secrets). */
+  /** Корень репозитория шлюза (для дефолтов data/secrets). */
   repoRoot: string;
   /** Корневой каталог JSON-хранилища шлюза (тенанты изолируются подкаталогами). */
   dataDir: string;

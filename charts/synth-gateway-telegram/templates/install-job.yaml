@@ -6,7 +6,7 @@
 {{- $only := list }}
 {{- if .Values.autoInstall.mcp }}{{ $only = append $only "mcp" }}{{ end }}
 {{- if .Values.autoInstall.skills }}{{ $only = append $only "skills" }}{{ end }}
-# Hook-Job авто-установки ресурсов аддона (`provides` из addon.json) в инстанс Synth.
+# Hook-Job авто-установки ресурсов аддона (`provides` из synth.pack) в инстанс Synth.
 #
 # Запускается после install/upgrade; идемпотентен (повторный запуск обновляет
 # конфиг, а не плодит дубликаты). Токен — только из Secret (installerSecretName);
@@ -83,7 +83,7 @@ spec:
                   name: {{ required "autoInstall.installerSecretName обязателен при autoInstall.enabled=true" .Values.autoInstall.installerSecretName }}
                   key: {{ .Values.autoInstall.installerSecretKey | default "token" }}
             {{- if and .Values.autoInstall.mcp (include "synth-gateway-telegram.hasExplicitMcpTokenSecret" .) }}
-            # Bearer-токен MCP-клиентов add-on'а: инсталлятор положит его в
+            # Bearer-токен MCP-клиентов шлюза: инсталлятор положит его в
             # config.headers.Authorization записи реестра (Synth-MCP-клиент
             # авторизуется им при подключении к /mcp/<tenant>). Не логируется.
             - name: SYNTH_MCP_TOKEN

@@ -13,7 +13,7 @@ set -euo pipefail
 
 {
   echo 'body<<GVEOF'
-  printf 'Релиз Telegram-шлюза Synth (add-on) v%s\n' "$VERSION"
+  printf 'Релиз Telegram-шлюза Synth (Gateway) v%s\n' "$VERSION"
   echo ''
   echo '## Артефакты'
   echo ''
