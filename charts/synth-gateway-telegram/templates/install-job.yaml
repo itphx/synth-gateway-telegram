@@ -1,0 +1,120 @@
+{{- if .Values.autoInstall.enabled }}
+{{- $skillsCm := and .Values.autoInstall.skillsFromConfigMap.enabled (gt (len .Values.autoInstall.skillsFromConfigMap.files) 0) }}
+{{- if and .Values.autoInstall.mcp (not (or .Values.autoInstall.mcpUrl .Values.mcp.enabled)) }}
+{{- fail "autoInstall.mcp=true, но MCP-эндпоинт не задан: включите mcp.enabled или задайте autoInstall.mcpUrl (либо autoInstall.mcp=false)" }}
+{{- end }}
+{{- $only := list }}
+{{- if .Values.autoInstall.mcp }}{{ $only = append $only "mcp" }}{{ end }}
+{{- if .Values.autoInstall.skills }}{{ $only = append $only "skills" }}{{ end }}
+# Hook-Job авто-установки ресурсов аддона (`provides` из addon.json) в инстанс Synth.
+#
+# Запускается после install/upgrade; идемпотентен (повторный запуск обновляет
+# конфиг, а не плодит дубликаты). Токен — только из Secret (installerSecretName);
+# в логи не печатается.
+#
+# Проверка результата:
+#   kubectl -n {{ .Release.Namespace }} get job {{ include "synth-gateway-telegram.installJobName" . }}
+#   kubectl -n {{ .Release.Namespace }} logs job/{{ include "synth-gateway-telegram.installJobName" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "synth-gateway-telegram.installJobName" . }}
+  labels:
+    {{- include "synth-gateway-telegram.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-weight": "10"
+spec:
+  backoffLimit: {{ .Values.autoInstall.backoffLimit }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "synth-gateway-telegram.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: install
+          image: "{{ include "synth-gateway-telegram.autoInstallImage" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["node"]
+          args:
+            - {{ include "synth-gateway-telegram.installerPath" . | quote }}
+            - "--synth-url"
+            - {{ required "autoInstall.url обязателен при autoInstall.enabled=true" .Values.autoInstall.url | quote }}
+            {{- if .Values.autoInstall.tenant }}
+            - "--tenant"
+            - {{ .Values.autoInstall.tenant | quote }}
+            {{- end }}
+            {{- if .Values.autoInstall.mcpUrl }}
+            - "--mcp-url"
+            - {{ .Values.autoInstall.mcpUrl | quote }}
+            {{- else if .Values.mcp.enabled }}
+            # URL MCP собирается инсталлятором: http://<service-host>:<provides.mcp.port><path>
+            - "--service-host"
+            - {{ include "synth-gateway-telegram.serviceHost" . | quote }}
+            {{- end }}
+            {{- if $only }}
+            - "--only"
+            - {{ join "," $only | quote }}
+            {{- end }}
+            {{- if $skillsCm }}
+            - "--skills-dir"
+            - "/etc/synth-addon/skills"
+            {{- end }}
+          env:
+            # Installer-ключ (service-key) — только из Secret, в логи не попадает.
+            - name: SYNTH_INSTALL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "autoInstall.installerSecretName обязателен при autoInstall.enabled=true" .Values.autoInstall.installerSecretName }}
+                  key: {{ .Values.autoInstall.installerSecretKey | default "token" }}
+          {{- if .Values.autoInstall.resources }}
+          resources:
+            {{- toYaml .Values.autoInstall.resources | nindent 12 }}
+          {{- end }}
+          {{- if or .Values.autoInstall.scriptConfigMap $skillsCm }}
+          volumeMounts:
+            {{- if .Values.autoInstall.scriptConfigMap }}
+            - name: installer
+              mountPath: /opt/synth-addon
+              readOnly: true
+            {{- end }}
+            {{- if $skillsCm }}
+            - name: skills
+              mountPath: /etc/synth-addon/skills
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.autoInstall.scriptConfigMap $skillsCm }}
+      volumes:
+        {{- if .Values.autoInstall.scriptConfigMap }}
+        - name: installer
+          configMap:
+            name: {{ .Values.autoInstall.scriptConfigMap }}
+        {{- end }}
+        {{- if $skillsCm }}
+        - name: skills
+          configMap:
+            name: {{ include "synth-gateway-telegram.skillsConfigMapName" . }}
+            items:
+              {{- range $path, $content := .Values.autoInstall.skillsFromConfigMap.files }}
+              - key: {{ $path | replace "/" "__" | quote }}
+                path: {{ $path | quote }}
+              {{- end }}
+        {{- end }}
+      {{- end }}
+{{- end }}

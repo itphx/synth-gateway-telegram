@@ -16,6 +16,7 @@ import {
   tgNotify,
   tgSendButtons,
   tgSendMessage,
+  tgSendToUser,
   tgStatus,
   type TelegramToolContext,
 } from './tools.js';
@@ -165,6 +166,73 @@ describe('ошибки Bot API', () => {
     await expect(tgSendMessage(tokenContext(fetchImpl), { text: 'x' })).rejects.toThrow(
       'network down',
     );
+  });
+});
+
+describe('tg_send_to_user', () => {
+  /** Контекст с API v2: резолв user через mock fetch Synth. */
+  function lookupContext(routes: Record<string, Response>): TelegramToolContext {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const route = routes[url];
+      if (!route) throw new Error(`нет маршрута: ${url}`);
+      return route;
+    }) as unknown as typeof fetch;
+    const client = new TelegramClient({ dryRun: true });
+    return { client, synth: { baseUrl: 'http://synth:5000/api/v2', fetchImpl } };
+  }
+
+  const tgUser = {
+    id: 'u-1',
+    username: 'alice',
+    identities: [{ provider: 'telegram', externalId: '450316139' }],
+  };
+
+  it('резолвит user → chat_id через API и отправляет', async () => {
+    const ctx = lookupContext({
+      'http://synth:5000/api/v2/users/alice': new Response(JSON.stringify(tgUser), { status: 200 }),
+    });
+    const sent = await tgSendToUser(ctx, { user: 'alice', text: 'привет', replyToMessageId: 7 });
+    expect(sent.chat_id).toBe('450316139');
+    expect(sent.via).toBe('user');
+    expect(sent.userId).toBe('u-1');
+    expect(sent.username).toBe('alice');
+    expect(sent.reply_to_message_id).toBe(7);
+  });
+
+  it('fallback по principalId — без обращения к API', async () => {
+    const { ctx, fetchImpl } = dryRunContext();
+    const sent = await tgSendToUser(ctx, { principalId: 'tg:123', text: 'x' });
+    expect(sent.chat_id).toBe('123');
+    expect(sent.via).toBe('principalId');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('fallback по chatId — без обращения к API', async () => {
+    const { ctx, fetchImpl } = dryRunContext();
+    const sent = await tgSendToUser(ctx, { chatId: '-100500', text: 'x' });
+    expect(sent.chat_id).toBe('-100500');
+    expect(sent.via).toBe('chatId');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('без Telegram-идентичности — ошибка telegram.no_telegram_identity', async () => {
+    const ctx = lookupContext({
+      'http://synth:5000/api/v2/users/bob': new Response(
+        JSON.stringify({ id: 'u-2', username: 'bob', identities: [] }),
+        { status: 200 },
+      ),
+    });
+    await expect(tgSendToUser(ctx, { user: 'bob', text: 'x' })).rejects.toMatchObject({
+      code: 'telegram.no_telegram_identity',
+    });
+  });
+
+  it('без настроенного API v2 резолвинг по user невозможен', async () => {
+    const { ctx } = dryRunContext();
+    await expect(tgSendToUser(ctx, { user: 'alice', text: 'x' })).rejects.toMatchObject({
+      code: 'telegram.user_lookup_unavailable',
+    });
   });
 });
 

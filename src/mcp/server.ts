@@ -9,6 +9,7 @@ import {
   tgNotify,
   tgSendButtons,
   tgSendMessage,
+  tgSendToUser,
   tgStatus,
   type TelegramToolContext,
 } from './tools.js';
@@ -37,8 +38,12 @@ function ok(data: unknown): ToolResult {
 
 function fail(error: unknown): ToolResult {
   const message = error instanceof Error ? error.message : String(error);
-  console.error('[gateway-mcp] ошибка инструмента:', message);
-  return { content: [{ type: 'text', text: message }], isError: true };
+  // Машинный код ошибки (TelegramMcpError/SynthUserLookupError) — агенту нужен
+  // и код (для ветвления), и человекочитаемый текст.
+  const code = isRecord(error) && typeof error.code === 'string' ? error.code : undefined;
+  const text = code && !message.startsWith(code) ? `${code}: ${message}` : message;
+  console.error('[gateway-mcp] ошибка инструмента:', text);
+  return { content: [{ type: 'text', text }], isError: true };
 }
 
 const chatId = z.union([z.string(), z.number()]).optional();
@@ -153,6 +158,32 @@ export function createMcpServer(context: TelegramToolContext, version: string): 
     async () => {
       try {
         return ok(await tgGetMe(context));
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'tg_send_to_user',
+    {
+      title: 'Сообщение пользователю Synth',
+      description:
+        'Отправляет сообщение конкретному пользователю Synth. Адресат — один из: ' +
+        '`user` (id или username учётной записи Synth; резолвится через API v2, ' +
+        'нужен scope users:read), `principalId` («tg:<id>», AD-089) или `chatId` ' +
+        '(напрямую). Если у пользователя нет Telegram-идентичности — понятная ошибка.',
+      inputSchema: {
+        text: z.string(),
+        user: z.string().optional(),
+        principalId: z.string().optional(),
+        chatId,
+        replyToMessageId: z.number().int().optional(),
+      },
+    },
+    async (input) => {
+      try {
+        return ok(await tgSendToUser(context, input));
       } catch (error) {
         return fail(error);
       }

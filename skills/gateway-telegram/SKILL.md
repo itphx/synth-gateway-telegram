@@ -13,6 +13,8 @@ description: Уведомления и сообщения в Telegram через
 
 - **Уведомить владельца** о значимом событии (завершён релиз, готов черновик,
   нужен ответ) — `tg_notify`.
+- **Отправить сообщение конкретному пользователю Synth** (по `username`/id,
+  `principalId` или `chatId`) — `tg_send_to_user`.
 - **Отправить сообщение** в конкретный чат/канал — `tg_send_message`.
 - **Поправить/удалить** ранее отправленное шлюзом сообщение — `tg_edit_message`,
   `tg_delete_message`.
@@ -27,12 +29,27 @@ description: Уведомления и сообщения в Telegram через
 | Тул | Параметры | Назначение |
 |---|---|---|
 | `tg_send_message` | `text`, `chatId?`, `replyToMessageId?` | Отправить сообщение (chatId по умолчанию — `GATEWAY_DEFAULT_CHAT_ID`) |
+| `tg_send_to_user` | `text`, `user?` \| `principalId?` \| `chatId?`, `replyToMessageId?` | Сообщение конкретному пользователю Synth: `user` (id/username Synth; резолвится через API v2, нужен scope `users:read`), `principalId` (`tg:<id>`) или `chatId` — напрямую |
 | `tg_edit_message` | `messageId`, `text`, `chatId?` | Изменить текст ранее отправленного сообщения |
 | `tg_delete_message` | `messageId`, `chatId?` | Удалить сообщение |
 | `tg_notify` | `text` | Уведомление владельцу с маркером «🔔» |
 | `tg_send_buttons` | `text`, `buttons: [{ text, data }]`, `chatId?` | Inline-клавиатура: `data` → `callback_data` (≤64 байта) |
 | `tg_get_me` | — | `getMe` — проверка бота |
 | `tg_status` | `chatId?` | Best-effort привязка чата/сессии из `GATEWAY_DATA_DIR` |
+
+### Кому отправлять (`tg_send_to_user`)
+
+Используй, когда адресат — **человек с учётной записью Synth**, а не чат:
+
+1. `user: "<id или username>"` — надёжно, но требует машинной креды со scope
+   `users:read` (профиль → `identities[]` provider `telegram` → chat_id).
+2. `principalId: "tg:<id>"` — если знаешь Telegram-id отправителя
+   (например, из события или из `metadata.principal_id`); без обращения к API.
+3. `chatId: <id>` — если известен сам чат.
+
+Если у пользователя нет Telegram-идентичности — придёт понятная ошибка
+(`telegram.no_telegram_identity`): человеку нужно привязать аккаунт в UI Synth
+(Настройки → Профиль → Идентичности).
 
 ## Входящие сообщения и внешние события
 
@@ -58,5 +75,11 @@ long-polling Telegram → нормализация → **`POST /api/v2/events`**
 # из корня репозитория add-on'а
 pnpm build
 node dist/mcp/index.js --help
-# MCP-сервер synth-gateway-telegram подключается к Synth
+
+# MCP по HTTP (используется в кластере: stdio там недоступен)
+GATEWAY_MCP_TOKEN=<токен> node dist/mcp/index.js --http --port 7101
+curl -s http://127.0.0.1:7101/health
+
+# MCP-сервер synth-gateway-telegram подключается к Synth как http-сервер
+# (реестр MCP: <synthUrl>/mcp/registry, URL http://<host>:7101/mcp/<tenant>)
 ```

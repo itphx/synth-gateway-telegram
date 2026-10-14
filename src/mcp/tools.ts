@@ -4,9 +4,16 @@ import { join } from 'node:path';
 import type {
   BotApiResponse,
   InlineKeyboardMarkup,
+  Message,
   TelegramClient,
   User,
 } from '../bot-api/index.js';
+
+import {
+  resolveTelegramChatId,
+  type SynthUserLookupOptions,
+  type TelegramTargetInput,
+} from './user-lookup.js';
 
 /** Ошибка инструмента Telegram-MCP (машиночитаемый код). */
 export class TelegramMcpError extends Error {
@@ -37,6 +44,12 @@ export interface TelegramToolContext {
   ownerChatId?: string;
   /** Каталог JSON-хранилища шлюза (для `tg_status`; может отсутствовать). */
   dataDir?: string;
+  /**
+   * Доступ к API v2 Synth (нужен `tg_send_to_user` для резолвинга `user` →
+   * Telegram-идентичность). Не задан — резолвинг по `user` недоступен
+   * (работают `principalId`/`chatId`).
+   */
+  synth?: SynthUserLookupOptions;
 }
 
 function validateCallbackData(data: string): void {
@@ -130,6 +143,49 @@ export async function tgSendButtons(
 /** `tg_get_me`: сведения о боте — проверка подключения. */
 export async function tgGetMe(ctx: TelegramToolContext): Promise<BotApiResponse<User>> {
   return ctx.client.getMe();
+}
+
+/** Вход `tg_send_to_user`: адресат (user | principalId | chatId) + текст. */
+export interface TgSendToUserInput extends TelegramTargetInput {
+  text: string;
+  replyToMessageId?: number;
+}
+
+/** Ответ `tg_send_to_user`: ответ Bot API + разрешённый адресат. */
+export interface TgSendToUserResult extends BotApiResponse<Message> {
+  /** Как получен адресат (`chatId` | `principalId` | `user`). */
+  via: 'chatId' | 'principalId' | 'user';
+  /** Итоговый chat_id. */
+  chatId: string;
+  /** id/username пользователя Synth (при резолвинге по `user`). */
+  userId?: string;
+  username?: string;
+}
+
+/**
+ * `tg_send_to_user`: сообщение конкретному пользователю Synth.
+ *
+ * `user` (id/username Synth) резолвится через API v2 машинной кредой тенанта
+ * (нужен scope `users:read`) → `identities[]` provider `telegram` → chat_id.
+ * `principalId` (`tg:<id>`) и `chatId` отправляются без обращения к API.
+ */
+export async function tgSendToUser(
+  ctx: TelegramToolContext,
+  input: TgSendToUserInput,
+): Promise<TgSendToUserResult> {
+  const target = await resolveTelegramChatId(ctx.synth, input);
+  const response = await ctx.client.sendMessage({
+    chatId: target.chatId,
+    text: input.text,
+    ...(input.replyToMessageId !== undefined ? { replyToMessageId: input.replyToMessageId } : {}),
+  });
+  return {
+    ...response,
+    via: target.via,
+    chatId: target.chatId,
+    ...(target.userId !== undefined ? { userId: target.userId } : {}),
+    ...(target.username !== undefined ? { username: target.username } : {}),
+  };
 }
 
 /** Привязка чата к сессии из хранилища шлюза (минимальный срез). */

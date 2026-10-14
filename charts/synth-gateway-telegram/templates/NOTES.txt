@@ -32,6 +32,25 @@
   (при необходимости --set tenantsFile.secretName=<secret>).
 {{- end }}
 
+MCP по HTTP (Streamable HTTP) — второй контейнер того же пода:
+
+{{- if .Values.mcp.enabled }}
+  порт {{ .Values.mcp.port }} (Service `mcp`, путь запроса /mcp/<tenantId>):
+
+    http://{{ include "synth-gateway-telegram.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.mcp.port }}/mcp/<tenantId>
+
+  Проверка (без auth): /health; прочие запросы — Authorization: Bearer <MCP-токен>.
+  Токен: {{ if .Values.mcp.tokenSecretName }}Secret {{ .Values.mcp.tokenSecretName }} (ключ {{ .Values.mcp.tokenSecretKey }}){{ else }}ключ {{ .Values.mcp.tokenSecretKey }} в existingSecret{{ if not .Values.existingSecret }} — ВНИМАНИЕ: Secret не задан, контейнер MCP не стартует{{ end }}{{ end }}.
+
+  Подключение в Synth (реестр MCP-серверов):
+
+    URL:        http://{{ include "synth-gateway-telegram.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.mcp.port }}/mcp/<tenantId>
+    Заголовок:  Authorization: Bearer <MCP-токен>
+    (делается автоматически при autoInstall.enabled=true)
+{{- else }}
+  mcp.enabled=false — MCP-контейнер и порт 7101 не поднимаются (только сервис шлюза).
+{{- end }}
+
 Persistent-хранилище (data-dir):
 
 {{- if .Values.persistence.enabled }}
@@ -43,3 +62,36 @@ Persistent-хранилище (data-dir):
 Внимание: add-on — внешний сервис, а не плагин. Он общается с Synth по API v2,
 MCP и внешним событиям; точек расширения Extension API у него нет
 (AD-086/AD-090, см. docs/addon.md).
+
+{{- if .Values.autoInstall.enabled }}
+
+Авто-установка ресурсов в Synth (hook-Job):
+
+  ресурсы:        mcp={{ .Values.autoInstall.mcp }}, skills={{ .Values.autoInstall.skills }}
+  инстанс Synth:  {{ .Values.autoInstall.url }}
+{{- if .Values.autoInstall.tenant }}
+  tenant:         {{ .Values.autoInstall.tenant }}
+{{- end }}
+  installer-ключ: Secret {{ .Values.autoInstall.installerSecretName }} (ключ {{ .Values.autoInstall.installerSecretKey }})
+
+Проверить результат:
+
+  kubectl -n {{ .Release.Namespace }} get job {{ include "synth-gateway-telegram.installJobName" . }}
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "synth-gateway-telegram.installJobName" . }}   # [install] … (токен не печатается)
+
+  # в инстансе Synth (ключом с правами чтения):
+  curl -s -H "Authorization: Bearer <ключ>" {{ .Values.autoInstall.url }}/mcp/registry
+  curl -s -H "Authorization: Bearer <ключ>" {{ .Values.autoInstall.url }}/skills
+{{- else }}
+
+Авто-установка ресурсов выключена (autoInstall.enabled=false). Чтобы MCP-сервер
+и скилл шлюза появились в инстансе Synth:
+
+  helm upgrade --install {{ .Release.Name }} <чарт> \
+    --set autoInstall.enabled=true \
+    --set autoInstall.url=http://synth-backend.synth.svc.cluster.local:5000/api/v2 \
+    --set autoInstall.tenant=<tenantId> \
+    --set autoInstall.installerSecretName=<secret с installer-ключом>
+
+Подробности — docs/deployment.md §«Авто-установка MCP и скиллов».
+{{- end }}

@@ -1,4 +1,6 @@
-# Service сервиса-надстройки: ClusterIP c портом сервиса.
+# Service сервиса-надстройки: ClusterIP c портом сервиса (+ порт MCP по флагу mcp.enabled).
+# Порт MCP нужен инстансу Synth, чтобы подключить MCP-сервер по HTTP
+# (`/mcp/<tenantId>`); контейнер MCP живёт в том же поде (общая сеть пода).
 apiVersion: v1
 kind: Service
 metadata:
@@ -12,5 +14,11 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: http
       protocol: TCP
+    {{- if .Values.mcp.enabled }}
+    - name: mcp
+      port: {{ .Values.mcp.port }}
+      targetPort: mcp
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "synth-gateway-telegram.selectorLabels" . | nindent 4 }}

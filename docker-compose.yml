@@ -50,5 +50,36 @@ services:
       # - ./certs/ca.crt:/certs/ca.crt:ro
     restart: unless-stopped
 
+  # MCP по HTTP (Streamable HTTP) — как второй контейнер в кластере: тот же образ,
+  # тот же volume/секреты, путь запроса /mcp/<tenantId>, GET /health — без auth.
+  # Требуется GATEWAY_MCP_TOKEN (в .env); без него контейнер не стартует.
+  mcp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: synth-gateway-telegram:latest
+    entrypoint: ["node", "dist/mcp/index.js"]
+    command: ["--http", "--host", "0.0.0.0", "--port", "7101"]
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "7101"
+      GATEWAY_DATA_DIR: /var/lib/synth-gateway/data
+      GATEWAY_SECRETS_DIR: /run/secrets
+      GATEWAY_MCP_TOKEN: ${GATEWAY_MCP_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SYNTH_SERVICE_KEY: ${SYNTH_SERVICE_KEY:-}
+      SYNTH_API_KEY: ${SYNTH_API_KEY:-}
+      SYNTH_URL: ${SYNTH_URL:-http://host.docker.internal:5000/api/v2}
+      GATEWAY_TENANTS_FILE: ${GATEWAY_TENANTS_FILE:-}
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+    ports:
+      - "7101:7101"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - gateway-data:/var/lib/synth-gateway/data
+      - ./secrets:/run/secrets:ro
+    restart: unless-stopped
+
 volumes:
   gateway-data:

@@ -34,12 +34,15 @@ describe(`MCP-сервер ${SERVER_NAME}`, () => {
           'tg_notify',
           'tg_send_buttons',
           'tg_send_message',
+          'tg_send_to_user',
           'tg_status',
         ].sort(),
       );
       // Схемы: обязательные поля присутствуют.
       const send = tools.find((tool) => tool.name === 'tg_send_message');
       expect(send?.inputSchema.required).toEqual(['text']);
+      const sendToUser = tools.find((tool) => tool.name === 'tg_send_to_user');
+      expect(sendToUser?.inputSchema.required).toEqual(['text']);
       const buttons = tools.find((tool) => tool.name === 'tg_send_buttons');
       expect(buttons?.inputSchema.required?.sort()).toEqual(['buttons', 'text']);
     } finally {
@@ -68,6 +71,35 @@ describe(`MCP-сервер ${SERVER_NAME}`, () => {
       const structured = result.structuredContent as { dryRun?: boolean; result?: { is_bot?: boolean } };
       expect(structured.dryRun).toBe(true);
       expect(structured.result?.is_bot).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('tg_send_to_user по principalId работает без API Synth (dry-run)', async () => {
+    const client = await connect(dryRunContext());
+    try {
+      const result = await client.callTool({
+        name: 'tg_send_to_user',
+        arguments: { text: 'привет', principalId: 'tg:450316139' },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        dryRun: true,
+        chat_id: '450316139',
+        via: 'principalId',
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('tg_send_to_user без адресата — понятная ошибка инструмента', async () => {
+    const client = await connect(dryRunContext());
+    try {
+      const result = await client.callTool({ name: 'tg_send_to_user', arguments: { text: 'x' } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('telegram.target_required');
     } finally {
       await client.close();
     }

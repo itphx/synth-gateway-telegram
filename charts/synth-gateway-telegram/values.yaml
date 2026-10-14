@@ -35,6 +35,36 @@ service:
   port: 7100
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MCP-сервер по HTTP (Streamable HTTP) — второй контейнер в том же поде.
+#
+# В K3s stdio-MCP не работает (движок не спавнит процесс add-on'а), поэтому
+# add-on отдаёт MCP по HTTP: Synth подключает его как `mcp.servers.<name>` типа
+# `http` (напр. http://<release>:7101/mcp/<tenant>).
+#
+# Контейнер использует тот же образ (`node dist/mcp/index.js --http …`), тот же
+# Secret (envFrom: TELEGRAM_BOT_TOKEN/SYNTH_SERVICE_KEY/… и ключ GATEWAY_MCP_TOKEN)
+# и тот же PVC → инструменты видят тенантов и состояние шлюза.
+#
+# `port` должен совпадать с `provides.mcp.port` в addon.json: по нему чарт
+# собирает URL для авто-установки (autoInstall → --service-host).
+# ─────────────────────────────────────────────────────────────────────────────
+mcp:
+  enabled: true
+  port: 7101
+  # Secret с bearer-токеном клиентов MCP (ключ tokenSecretKey). Пусто — ключ
+  # берётся из existingSecret (envFrom). Без токена MCP-контейнер не стартует
+  # (fail-fast), значения токена в values не хранить.
+  tokenSecretName: ""
+  tokenSecretKey: GATEWAY_MCP_TOKEN
+  resources:
+    requests:
+      cpu: 20m
+      memory: 48Mi
+    limits:
+      cpu: 250m
+      memory: 192Mi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Env-переменные приложения (НЕ секреты). Секреты — через existingSecret.
 # ─────────────────────────────────────────────────────────────────────────────
 env:
@@ -179,6 +209,77 @@ ingress:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Авто-установка ресурсов add-on'а (из `provides` в addon.json) в инстанс Synth.
+#
+# Общий контракт шаблона add-on'ов (addons/synth-addon-template,
+# charts/synth-addon/values.yaml): hook-Job (`templates/install-job.yaml`,
+# post-install/post-upgrade) запускает `scripts/install-into-synth.mjs`:
+#   managed    — API v2 инстанса Synth (реестр MCP + скиллы);
+#   standalone — файлы локального инстанса (--config/--data-dir).
+#
+# Идемпотентно: повторный `helm upgrade` обновляет запись/скилл, а не плодит
+# дубликаты. Токен — ТОЛЬКО из Secret (installerSecretName); в values не хранить.
+#
+# Три вида аддонов (подробности — docs/addon.md):
+#   1) сервис + MCP + skills — значения по умолчанию ниже;
+#   2) только MCP — `mcp.enabled=true`, `autoInstall.mcp=true`, `autoInstall.skills=false`;
+#   3) только скиллы — `mcp.enabled=false`, `autoInstall.mcp=false`, `autoInstall.skills=true`.
+# ─────────────────────────────────────────────────────────────────────────────
+autoInstall:
+  # Запускать ли hook-Job установки ресурсов.
+  enabled: false
+  # Базовый URL API v2 инстанса Synth, например
+  # http://synth-backend.synth.svc.cluster.local:5000/api/v2
+  url: ""
+  # Значение подстановки {tenant} в provides.mcp.path (имя бота/среды).
+  tenant: ""
+  # Secret с installer-ключом (service-key/API-ключ с правами на MCP-реестр и
+  # скиллы; целевой скоуп — `addons:install`, см. docs/deployment.md) и ключ в нём.
+  installerSecretName: ""
+  installerSecretKey: "token"
+  # Что устанавливать (ресурсы берутся из addon.json `provides`).
+  mcp: true
+  skills: true
+  # Образ для hook-Job'а. Пусто — образ чарта (image.repository:image.tag),
+  # в котором есть addon.json, skills/ и scripts/install-into-synth.mjs.
+  image: ""
+  # Сколько раз Kubernetes повторит Job при падении.
+  backoffLimit: 3
+  # Путь к инсталлятору внутри образа.
+  scriptPath: "scripts/install-into-synth.mjs"
+  # Аддон без образа: имя существующего ConfigMap с ключом
+  # `install-into-synth.mjs` (создать: kubectl create configmap <имя>
+  # --from-file=install-into-synth.mjs=scripts/install-into-synth.mjs).
+  # Задан — монтируется в Job, scriptPath игнорируется.
+  scriptConfigMap: ""
+  # Явный URL MCP-сервера (переопределяет сборку из provides.mcp + mcp.port).
+  # Нужен, если MCP отдаётся не Service'ом чарта (внешний хост/ingress).
+  mcpUrl: ""
+  # Ресурсы hook-Job'а.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # Скиллы для аддонов без образа: чарт рендерит ConfigMap из files и монтирует
+  # её в Job (инсталлятор читает дерево как `--skills-dir`). Если у аддона есть
+  # образ — файлы берутся из него, эта опция не нужна.
+  #
+  # files — «относительный путь под корнем скиллов → содержимое», например:
+  #   files:
+  #     gateway-telegram/SKILL.md: |
+  #       ---
+  #       name: gateway-telegram
+  #       description: ...
+  #       ---
+  #       ...
+  skillsFromConfigMap:
+    enabled: false
+    files: {}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Произвольные дополнительные Kubernetes-манифесты. Список объектов

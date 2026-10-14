@@ -49,6 +49,43 @@ Telegram Bot API                 synth-gateway-telegram                    Synth
   отвечает агент, а не на последнее входящее (даже если во время генерации пришли
   новые сообщения).
 
+## MCP для агента
+
+Шлюз отдаёт агенту тулы `tg_*` (отправка/правка/удаление, `tg_notify`,
+`tg_send_buttons`, `tg_get_me`, `tg_status` и **`tg_send_to_user`** — сообщение
+конкретному пользователю Synth по `user`/`principalId`/`chatId`).
+
+Два транспорта:
+
+| Транспорт | Когда | Запуск |
+|---|---|---|
+| **stdio** (bin `synth-gateway-tg`) | локальный dev, движок спавнит процесс | `node dist/mcp/index.js` |
+| **Streamable HTTP** (`--http`) | кластер/K3s (движок не спавнит процесс add-on'а) | `node dist/mcp/index.js --http --port 7101` |
+
+HTTP-режим: путь `/mcp/<tenantId>` (тенанты — из `tenants.json`, неизвестный →
+404), `GET /health` без auth, остальное — `Authorization: Bearer
+<GATEWAY_MCP_TOKEN>` (секрет из env/`secrets/mcp_token`). В Helm-чарте это второй
+контейнер того же пода (порт 7101) — см. [docs/deployment.md](docs/deployment.md).
+
+## Авто-установка MCP и скиллов
+
+`addon.json` описывает секцию **`provides`** (MCP-сервер + скиллы), а
+`scripts/install-into-synth.mjs` **идемпотентно** регистрирует их в инстансе:
+managed — через API v2 (`/mcp/registry`, `/skills*`), standalone — merge
+`mcp.servers` в `config.yaml` + копирование скиллов в `{dataDir}/skills`.
+В кластере это делает hook-Job чарта (`autoInstall`, `post-install,post-upgrade`),
+токен — из Secret и в логи не попадает.
+
+```bash
+# план установки (изменений нет)
+node scripts/install-into-synth.mjs --synth-url http://127.0.0.1:5000/api/v2 \
+  --token "$SYNTH_INSTALL_TOKEN" --tenant dev --service-host 127.0.0.1 --dry-run
+```
+
+Контракт `provides`, три вида аддонов и HTTP-MCP — [docs/addon.md](docs/addon.md);
+values, Secret и проверка — [docs/deployment.md](docs/deployment.md) §«Авто-установка
+MCP и скиллов».
+
 ## Быстрый старт
 
 ```bash
@@ -98,17 +135,20 @@ cp .env.example .env && docker compose up --build
 
 ```text
 synth-gateway-telegram/
+├── addon.json       # манифест add-on'а (kind/host/contracts) + `provides` (mcp, skills)
 ├── src/
 │   ├── gateway/     # сервис synth-gateway-telegram (bin): поллер, нормализация, ingest, watcher, health
 │   │                #   markdown.ts — Markdown → Telegram-HTML; inbound.ts — InboundRegistry (reply-адресат)
-│   ├── mcp/         # MCP-сервер synth-gateway-tg (bin, stdio): тулы tg_*
+│   ├── mcp/         # MCP-сервер synth-gateway-tg (bin): stdio и HTTP (http.ts)
+│   │                #   http.ts — Streamable HTTP, /mcp/<tenant>, bearer-auth; user-lookup.ts — tg_send_to_user
+│   ├── installer/   # install.ts — логика инсталлятора ресурсов (managed/standalone, идемпотентно)
 │   └── bot-api/     # клиент Telegram Bot API (fetch + прокси)
-├── charts/synth-gateway-telegram/    # Helm-чарт (k8s + NOTES.txt)
+├── scripts/         # install-into-synth.mjs (обёртка инсталлятора) + release-хелперы
+├── charts/synth-gateway-telegram/    # Helm-чарт (MCP-контейнер, hook-Job авто-установки)
 ├── docker/ · docker-compose.yml · .env.example
-├── examples/        # примеры Secret и tenants.json
+├── examples/        # примеры Secret (сервис, installer-ключ) и tenants.json
 ├── docs/            # configuration.md · deployment.md · addon.md
 ├── skills/gateway-telegram/SKILL.md  # скилл AD-046 для агента
-├── scripts/         # release-хелперы (docker-auth, publish-chart, version-bump, release-notes)
 └── .gitverse/workflows/  # ci.yaml (push/PR) · release.yaml (Docker + Helm + Release по тегу v*)
 ```
 

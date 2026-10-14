@@ -35,6 +35,13 @@ RUN pnpm install --prod --frozen-lockfile
 # Собранный код сервиса.
 COPY --from=builder /src/dist ./dist
 
+# Артефакты авто-установки (hook-Job чарта `autoInstall`): манифест `provides`,
+# референсный инсталлятор и скиллы. Нужны образу, даже когда сервис не запускается
+# (аддон «только MCP/скиллы»): `node scripts/install-into-synth.mjs …`.
+COPY addon.json ./
+COPY scripts/install-into-synth.mjs ./scripts/
+COPY skills ./skills
+
 # JSON-хранилище (offset/дедуп/привязки чатов; монтируется volume'ом).
 ENV GATEWAY_HOST=0.0.0.0
 ENV GATEWAY_PORT=7100

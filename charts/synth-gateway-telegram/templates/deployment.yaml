@@ -145,6 +145,94 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- if .Values.mcp.enabled }}
+        # MCP по HTTP (Streamable HTTP): тот же образ и тот же Secret/PVC, что и
+        # сервис шлюза. Тенанты — из tenants.json (GATEWAY_TENANTS_FILE), путь
+        # запроса — /mcp/<tenantId>; GET /health — для проб (без auth).
+        - name: mcp
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["node", "dist/mcp/index.js"]
+          args:
+            - "--http"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - {{ .Values.mcp.port | quote }}
+          ports:
+            - name: mcp
+              containerPort: {{ .Values.mcp.port }}
+              protocol: TCP
+          env:
+            {{- range $key, $value := .Values.env }}
+            {{- if ne $key "GATEWAY_PORT" }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            # Порт MCP-контейнера (отличается от health-порта сервиса).
+            - name: GATEWAY_PORT
+              value: {{ .Values.mcp.port | quote }}
+            {{- if .Values.tenantsFile.enabled }}
+            - name: GATEWAY_TENANTS_FILE
+              value: {{ .Values.tenantsFile.mountPath | quote }}
+            {{- end }}
+            {{- if .Values.ca.enabled }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ .Values.ca.mountPath | quote }}
+            {{- end }}
+          {{- if or .Values.existingSecret .Values.mcp.tokenSecretName }}
+          envFrom:
+            {{- if .Values.existingSecret }}
+            # Bot-токен/креды Synth и (при наличии) GATEWAY_MCP_TOKEN.
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+            {{- end }}
+            {{- if and .Values.mcp.tokenSecretName (ne .Values.mcp.tokenSecretName .Values.existingSecret) }}
+            # Отдельный Secret с bearer-токеном MCP-клиентов (ключ GATEWAY_MCP_TOKEN).
+            - secretRef:
+                name: {{ .Values.mcp.tokenSecretName }}
+            {{- end }}
+          {{- end }}
+          {{- if or .Values.persistence.enabled .Values.tenantsFile.enabled .Values.ca.enabled }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+            {{- if .Values.tenantsFile.enabled }}
+            - name: tenants
+              mountPath: {{ dir .Values.tenantsFile.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.ca.enabled }}
+            - name: ca
+              mountPath: {{ .Values.ca.mountPath }}
+              subPath: {{ .Values.ca.configMapKey }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: mcp
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: mcp
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          {{- with .Values.mcp.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
       {{- if or .Values.persistence.enabled .Values.tenantsFile.enabled .Values.ca.enabled }}
       volumes:
         {{- if .Values.persistence.enabled }}

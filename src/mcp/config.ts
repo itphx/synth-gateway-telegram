@@ -18,6 +18,11 @@ export interface McpConfig {
   defaultChatId?: string;
   /** Получатель `tg_notify` (по умолчанию — `defaultChatId`). */
   ownerChatId?: string;
+  /**
+   * Bearer-токен HTTP-MCP-клиентов (`--http`): env `GATEWAY_MCP_TOKEN` /
+   * `secrets/mcp_token`. Секрет: в логи не попадает, в git не хранится.
+   */
+  mcpToken?: string;
 }
 
 /** Переопределения из CLI-флагов (приоритет выше env). */
@@ -27,6 +32,8 @@ export interface ConfigOverrides {
   proxyUrl?: string;
   defaultChatId?: string;
   ownerChatId?: string;
+  /** Bearer-токен HTTP-MCP (`--mcp-token`; env `GATEWAY_MCP_TOKEN`). */
+  mcpToken?: string;
   /**
    * Каталог секрет-файлов. Приоритет: `overrides.secretsDir` >
    * env `GATEWAY_SECRETS_DIR` > `<repoRoot>/secrets`.
@@ -92,7 +99,8 @@ const PROXY_ENV = ['TELEGRAM_PROXY_URL', 'ALL_PROXY', 'HTTPS_PROXY', 'HTTP_PROXY
  * Поля: `TELEGRAM_BOT_TOKEN` / `secrets/telegram_bot_token`;
  * `TELEGRAM_PROXY_URL` (цепочка) / `secrets/telegram_proxy_url`;
  * `GATEWAY_DEFAULT_CHAT_ID` и `GATEWAY_OWNER_CHAT_ID` /
- * `secrets/telegram_owner_chat_id`; `GATEWAY_DATA_DIR`.
+ * `secrets/telegram_owner_chat_id`; `GATEWAY_DATA_DIR`; `GATEWAY_MCP_TOKEN` /
+ * `secrets/mcp_token` (bearer-токен HTTP-режима `--http`).
  */
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -121,6 +129,9 @@ export function loadConfig(
     secretOwnerChat ??
     defaultChatId;
 
+  const mcpToken =
+    overrides.mcpToken ?? envOr(env, 'GATEWAY_MCP_TOKEN') ?? readSecret('mcp_token', secretsDir);
+
   return {
     version: readVersion(),
     repoRoot: REPO_ROOT,
@@ -128,5 +139,6 @@ export function loadConfig(
     telegram: { token, proxyUrl },
     defaultChatId,
     ownerChatId,
+    ...(mcpToken !== undefined ? { mcpToken } : {}),
   };
 }

@@ -40,15 +40,24 @@ Telegram-бот ↔ платформа внешних событий (`POST /api
 9. **Типы Bot API — только из `@grammyjs/types`** (единственный источник истины).
    Свои зеркала Telegram-типов не заводить; локально допустим лишь минимальный
    конверт ответа (`BotApiResponse`).
-10. **Коммит** — только по явной просьбе; новые зависимости — с разрешения.
+10. **Токены — не в git и не в логах.** Bot-токен, service-key, `GATEWAY_MCP_TOKEN`,
+    installer-ключ живут в env/Secret/`secrets/`; в логах — только факт «задан/не
+    задан». HTTP-MCP сравнивает bearer-токен в постоянном времени; hook-Job
+    подставляет installer-ключ через `secretKeyRef` → `SYNTH_INSTALL_TOKEN`.
+11. **Инсталлятор идемпотентен.** `scripts/install-into-synth.mjs`
+    (`src/installer/install.ts`) повторным прогоном **обновляет** запись
+    MCP-реестра/скилл, а не создаёт дубликаты (managed: `POST`→409→`PUT`;
+    standalone: перезапись тем же содержимым); ошибка → понятное сообщение и
+    exit-code ≠ 0.
+12. **Коммит** — только по явной просьбе; новые зависимости — с разрешения.
 
 ## Границы
 
 - **Недоступно** (это Extension API **плагинов**): хуки жизненного цикла,
   `ToolRegistry`, `ProviderFactory`, UI-слоты; прямой доступ к internals ядра
   (сессии в обход API, `GatewayProvider`, `FileStore` ядра).
-- **Доступно:** API v2 (events + bindings, sessions), чтение событий (SSE) — по
-  мере надобности; MCP (stdio).
+- **Доступно:** API v2 (events + bindings, sessions, users, mcp registry, skills),
+  чтение событий (SSE) — по мере надобности; MCP (stdio + Streamable HTTP).
 
 ## Структура
 
@@ -56,13 +65,36 @@ Telegram-бот ↔ платформа внешних событий (`POST /api
 src/gateway/   # bin synth-gateway-telegram — сервис (поллер, нормализация, ingest, watcher, health, хранилище)
 │              #   markdown.ts — Markdown → Telegram-HTML (чанкинг ≤4096, балансировка тегов)
 │              #   inbound.ts  — InboundRegistry: dedupKey/stream_id → messageId (reply-адресат)
-src/mcp/       # bin synth-gateway-tg — MCP-сервер (stdio), тулы tg_*; скилл — skills/gateway-telegram/SKILL.md
+src/mcp/       # bin synth-gateway-tg — MCP-сервер, тулы tg_*; скилл — skills/gateway-telegram/SKILL.md
+│              #   index.ts      — CLI: stdio (по умолчанию) и --http
+│              #   http.ts       — Streamable HTTP: /mcp/<tenantId>, bearer-auth, GET /health
+│              #   user-lookup.ts — резолв `user` → Telegram (API v2, identities, scope users:read)
+src/installer/ # install.ts — инсталлятор ресурсов (`provides`): managed (API v2) и standalone
 src/bot-api/   # клиент Telegram Bot API (fetch + прокси), типы из @grammyjs/types
+scripts/       # install-into-synth.mjs — обёртка инсталлятора (для hook-Job чарта) + release-хелперы
 ```
 
 `tsconfig.json` — базовый (editor/`pnpm typecheck`, включает тесты); `tsconfig.build.json`
 (`extends`, эмит без `*.test.ts`) — для `pnpm build`. Тесты — рядом с исходниками (`*.test.ts`).
-Сборка: `pnpm build` → `dist/gateway/index.js`, `dist/mcp/index.js`.
+Сборка: `pnpm build` → `dist/gateway/index.js`, `dist/mcp/index.js`, `dist/installer/install.js`.
+
+## MCP: транспорты и авто-установка
+
+- **stdio** (`node dist/mcp/index.js`) — локальный dev; **HTTP**
+  (`--http --port 7101`) — кластер: контекст инструментов берётся из
+  `tenants.json` **тенанта** (`/mcp/<tenantId>`, неизвестный → 404), токен —
+  `GATEWAY_MCP_TOKEN`/`secrets/mcp_token` (нет/неверный → 401).
+- **`provides` в `addon.json`** — контракт с инсталлятором: `mcp`
+  (name/transport/port/`path: /mcp/{tenant}`) и `skills`
+  (`{name, path}`); `{tenant}` подставляется `--tenant`.
+- **Чарт** (`charts/synth-gateway-telegram`): MCP-контейнер в том же поде
+  (`mcp.enabled`/`mcp.port`, порт Service, тот же Secret/PVC) и hook-Job
+  `templates/install-job.yaml` (`autoInstall`, post-install/post-upgrade) с
+  общим контрактом шаблона add-on'ов (`addons/synth-addon-template`);
+  `autoInstall.mcp=true` требует MCP-эндпоинт (`mcp.enabled` или `autoInstall.mcpUrl`).
+- **Образ** (`docker/Dockerfile`) содержит `addon.json`, `skills/` и
+  `scripts/install-into-synth.mjs` — они нужны hook-Job'у; ENTRYPOINT сервиса
+  при этом не меняется.
 
 ## Релиз и публикация
 
@@ -98,4 +130,8 @@ Go-шаблон GitVerse CI).
 | Релиз / публикация (Docker/Helm) | `.gitverse/workflows/release.yaml`, `scripts/`, `docs/deployment.md` |
 | Таймауты / прокси / клиент Bot API | `src/bot-api/transport.ts`, `src/bot-api/client.ts` |
 | MCP-тулы (`tg_*`) | `src/mcp/server.ts`, `src/mcp/tools.ts` |
+| MCP по HTTP (тенант-роутинг, auth) | `src/mcp/http.ts`, `src/mcp/index.ts` |
+| `tg_send_to_user` / резолв пользователя Synth | `src/mcp/user-lookup.ts` |
+| Авто-установка ресурсов (`provides`) | `src/installer/install.ts`, `scripts/install-into-synth.mjs`, `addon.json` |
+| Чарт: MCP-контейнер, hook-Job | `charts/synth-gateway-telegram/templates/{deployment,service,install-job}.yaml`, `values.yaml` |
 | Скилл агента | `skills/gateway-telegram/SKILL.md` |

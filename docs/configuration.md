@@ -87,6 +87,24 @@ CLI-флаг  >  env  >  файл secrets/  >  значение по умолч�
 | `GATEWAY_OWNER_CHAT_ID` | `GATEWAY_DEFAULT_CHAT_ID` | Получатель `tg_notify` |
 | `GATEWAY_DATA_DIR` | `<repo>/data` | Каталог хранилища шлюза (для `tg_status`) |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_PROXY_URL` | см. выше | Токен и прокси Bot API |
+| `GATEWAY_MCP_TOKEN` | — | Bearer-токен клиентов **HTTP-MCP** (`--http`; файл `secrets/mcp_token`). Не задан → HTTP-режим не стартует (fail-fast) |
+| `GATEWAY_TENANTS_FILE` | `secrets/tenants.json` | Тенанты HTTP-MCP: `/mcp/<tenantId>`, контекст инструментов — из этого файла |
+| `SYNTH_URL` | `http://127.0.0.1:5000/api/v2` | API v2 тенанта (legacy-режим): резолв `tg_send_to_user` и вход в события |
+| `SYNTH_SERVICE_KEY` | `secrets/synth_service_key` | Машинная креда для резолва `user` → Telegram (нужен scope `users:read`) |
+
+### `tg_send_to_user` и требуемые права
+
+Тул отправляет сообщение конкретному пользователю Synth. Адресат — `user` (id или
+`username` учётной записи Synth), `principalId` (`tg:<id>`, AD-089) либо `chatId`.
+
+- `principalId`/`chatId` — **без обращения к API** (работают и без scope).
+- `user` — через `GET {synthUrl}/users/:id` (при 404 — `GET /users` + поиск по
+  `username`) машинной кредой тенанта: нужен scope **`users:read`** (в ядре
+  добавляется параллельно). Из профиля берётся `identities[]` c
+  `provider === 'telegram'` → `external_id` = `chat_id`. Нет идентичности →
+  понятная ошибка (привязка — в UI Synth: Настройки → Профиль → Идентичности);
+  нет прав (401/403) → `telegram.user_forbidden`; API недоступен →
+  `telegram.synth_api_unavailable`.
 
 ## CLI-флаги
 
@@ -114,7 +132,30 @@ synth-gateway-telegram [--once] [--dry-run] [--no-watch] [--token TOKEN]
 
 ```text
 synth-gateway-tg [--token T] [--proxy URL] [--chat ID] [--owner ID] [--data-dir DIR] [--help]
+
+# HTTP-транспорт (Streamable HTTP; используется в K8s — stdio там недоступен)
+synth-gateway-tg --http [--host 0.0.0.0] [--port 7101]
+                 [--mcp-token TOKEN] [--tenants-file PATH] [--secrets-dir DIR]
+                 [--data-dir DIR] [--chat ID] [--owner ID]
 ```
+
+Без `--http` — прежний stdio-режим. В HTTP-режиме путь запроса — `/mcp/<tenantId>`
+(тенанты из `tenants.json`; неизвестный → 404), `GET /health` — без auth,
+остальное требует `Authorization: Bearer <GATEWAY_MCP_TOKEN>`. Порт по умолчанию —
+7101 (`--port`), адрес — `0.0.0.0` (`--host`). Флаги `--chat`/`--owner` задают
+дефолтный чат и получателя `tg_notify` для инструментов.
+
+### Инсталлятор ресурсов
+
+```text
+node scripts/install-into-synth.mjs \
+  [--synth-url URL] [--token TOKEN] [--tenant ID] \
+  [--mcp-url URL | --service-host HOST] [--only mcp,skills] [--skills-dir DIR] \
+  [--config PATH] [--data-dir DIR] [--root DIR] [--dry-run] [--help]
+```
+
+Подробности и примеры — [deployment.md](deployment.md) §«Авто-установка MCP и
+скиллов», контракт `provides` — [addon.md](addon.md).
 
 ## Секрет-файлы
 
@@ -135,6 +176,7 @@ synth-gateway-tg [--token T] [--proxy URL] [--chat ID] [--owner ID] [--data-dir 
 | `oidc_client_id` | `SYNTH_OIDC_CLIENT_ID` | OIDC `client_id` |
 | `oidc_client_secret` | `SYNTH_OIDC_CLIENT_SECRET` | OIDC `client_secret` |
 | `oidc_scope` | `SYNTH_OIDC_SCOPE` | Необязательный `scope` |
+| `mcp_token` | `GATEWAY_MCP_TOKEN` | Bearer-токен клиентов HTTP-MCP (`--http`) |
 
 Пример наполнения:
 

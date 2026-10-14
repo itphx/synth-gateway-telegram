@@ -1,0 +1,20 @@
+{{- if and .Values.autoInstall.enabled .Values.autoInstall.skillsFromConfigMap.enabled (gt (len .Values.autoInstall.skillsFromConfigMap.files) 0) }}
+# ConfigMap с файлами скиллов — для аддонов БЕЗ образа (только скиллы/MCP).
+#
+# Ключи ConfigMap не могут содержать `/`, поэтому ключ — путь с заменой `/` → `__`,
+# а исходная структура восстанавливается при монтировании (`items[].path` в
+# install-job.yaml). Результат: в Job каталог /etc/synth-addon/skills содержит
+# дерево `<skill-name>/SKILL.md` + supporting-файлы (инсталлятор читает его как
+# `--skills-dir`). Обычный ресурс релиза: на upgrade обновляется ДО hook-Job'а.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "synth-gateway-telegram.skillsConfigMapName" . }}
+  labels:
+    {{- include "synth-gateway-telegram.labels" . | nindent 4 }}
+data:
+  {{- range $path, $content := .Values.autoInstall.skillsFromConfigMap.files }}
+  {{ $path | replace "/" "__" | quote }}: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

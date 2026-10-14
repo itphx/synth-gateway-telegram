@@ -8,5 +8,20 @@
     "events": "^1",
     "mcp": "^1"
   },
-  "description": "Telegram-шлюз: мост между Telegram-ботом и платформой внешних событий Synth"
+  "description": "Telegram-шлюз: мост между Telegram-ботом и платформой внешних событий Synth",
+  "provides": {
+    "mcp": {
+      "name": "synth-gateway-telegram",
+      "transport": "http",
+      "port": 7101,
+      "path": "/mcp/{tenant}",
+      "description": "Telegram-шлюз: тулы tg_*"
+    },
+    "skills": [
+      {
+        "name": "gateway-telegram",
+        "path": "skills/gateway-telegram"
+      }
+    ]
+  }
 }
