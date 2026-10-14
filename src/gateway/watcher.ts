@@ -3,10 +3,17 @@ import type { BotApiResponse, TelegramClient } from '../bot-api/index.js';
 import type { BearerProvider } from './auth.js';
 import type { ParseMode } from './config.js';
 import type { GatewayHealth } from './health.js';
+import { chunkHtmlText, markdownToTelegramHtml, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText } from './markdown.js';
 import type { GatewayStore, SessionRoute } from './store.js';
 
-/** Максимальная длина сообщения Telegram. */
-export const TELEGRAM_MESSAGE_LIMIT = 4096;
+export { chunkHtmlText, markdownToTelegramHtml, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText };
+
+/**
+ * Grace-пауза фоллбека `message.added`, мс: ядро может прислать `message.added`
+ * (обрезанный контент) раньше `stream.done` (полный) — отложенная доставка
+ * отменяется, если за паузу пришёл стрим.
+ */
+export const ADDED_FALLBACK_GRACE_MS = 3000;
 
 /** Интервал повтора статуса «Печатает…», мс (Telegram держит статус ~5 c). */
 export const TYPING_INTERVAL_MS = 4000;
@@ -55,6 +62,14 @@ export interface SseEvent {
   timestamp?: string;
 }
 
+/** Отложенная фоллбек-доставка `message.added`: таймер grace-паузы. */
+interface PendingAdded {
+  timer: ReturnType<typeof setTimeout>;
+  /** Разрешается после доставки либо отмены (для наблюдения в тестах). */
+  settled: Promise<void>;
+  settle: () => void;
+}
+
 /** Опции {@link AgentWatcher}. */
 export interface WatcherOptions {
   /** Базовый URL API v2. */
@@ -82,6 +97,13 @@ function str(value: unknown): string | undefined {
 
 function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** `stream_id` из данных `message.added` (несётся в `metadata`). */
+function streamIdOf(data: Record<string, unknown>): string | undefined {
+  const metadata = data.metadata;
+  if (typeof metadata !== 'object' || metadata === null) return undefined;
+  return str((metadata as Record<string, unknown>).stream_id);
 }
 
 function delay(ms: number): Promise<void> {
@@ -129,33 +151,6 @@ export function escapeHtml(text: string): string {
 }
 
 /**
- * Режет **уже экранированный** для `parse_mode: 'HTML'` текст на сообщения не
- * длиннее `limit`. В отличие от {@link chunkText}, учитывает раздувание текста
- * HTML-сущностями: граница выбирается так, чтобы не разорвать сущность `&…;`.
- */
-export function chunkHtmlText(text: string, limit: number = TELEGRAM_MESSAGE_LIMIT): string[] {
-  if (text.length <= limit) return [text];
-  const chunks: string[] = [];
-  let rest = text;
-  while (rest.length > limit) {
-    // Предпочитаем границу строки, затем пробел, иначе — сам лимит.
-    let cut = rest.lastIndexOf('\n', limit);
-    if (cut <= 0) {
-      const space = rest.lastIndexOf(' ', limit);
-      cut = space > 0 ? space + 1 : limit;
-    }
-    // Не рвать HTML-сущность `&…;`: отступаем к её началу.
-    const amp = rest.lastIndexOf('&', cut - 1);
-    if (amp >= 0 && rest.indexOf(';', amp) >= cut) cut = amp > 0 ? amp : cut;
-    if (cut <= 0) cut = limit;
-    chunks.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\n/, '');
-  }
-  if (rest.length > 0) chunks.push(rest);
-  return chunks;
-}
-
-/**
  * Watcher ответов агента: слушает глобальный SSE `GET /events` и доставляет
  * ответы в чаты, привязанные к сессиям. Пока агент генерирует ответ, в чате
  * держится индикатор «Печатает…» и стримится live-сообщение (накопленный
@@ -182,6 +177,12 @@ export class AgentWatcher {
   private readonly live = new Map<string, LiveStream>();
   /** Завершённые `stream_id` — допоздние чанки после `done`/`cancelled` игнорируются. */
   private readonly finalizedStreams = new Set<string>();
+  /**
+   * Отложенные фоллбек-доставки `message.added` по сессиям (один таймер на
+   * сессию): ждём grace-паузу, не придёт ли `stream.done` с полным контентом.
+   * `settled` разрешается после доставки либо отмены — для тестов.
+   */
+  private readonly pendingAdded = new Map<string, PendingAdded>();
 
   constructor(options: WatcherOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -213,6 +214,25 @@ export class AgentWatcher {
   private resetLiveState(): void {
     for (const live of this.live.values()) this.clearTyping(live);
     this.live.clear();
+    this.clearPendingAdded();
+  }
+
+  /** Гасит отложенные фоллбек-доставки `message.added` (все сессии). */
+  private clearPendingAdded(): void {
+    for (const pending of this.pendingAdded.values()) {
+      clearTimeout(pending.timer);
+      pending.settle();
+    }
+    this.pendingAdded.clear();
+  }
+
+  /** Гасит отложенную фоллбек-доставку `message.added` конкретной сессии. */
+  private cancelPendingAdded(sessionId: string): void {
+    const pending = this.pendingAdded.get(sessionId);
+    if (pending === undefined) return;
+    clearTimeout(pending.timer);
+    pending.settle();
+    this.pendingAdded.delete(sessionId);
   }
 
   /** Цикл подключения к SSE с переподключением и backoff. */
@@ -379,6 +399,8 @@ export class AgentWatcher {
     route: SessionRoute,
     event: SseEvent,
   ): Promise<void> {
+    // Стрим закрылся — отложенный фоллбек `message.added` больше не нужен.
+    this.cancelPendingAdded(sessionId);
     const live = this.live.get(sessionId);
     const streamId =
       str(event.data.stream_id) ?? live?.streamId ?? `${sessionId}:${event.timestamp ?? ''}`;
@@ -429,6 +451,9 @@ export class AgentWatcher {
     route: SessionRoute,
     event: SseEvent,
   ): Promise<void> {
+    // Стрим доставил (или доставит) полный ответ — отложенный фоллбек-огрызок
+    // `message.added` отменяем.
+    this.cancelPendingAdded(sessionId);
     const live = this.live.get(sessionId);
     const streamId =
       str(event.data.stream_id) ?? live?.streamId ?? `${sessionId}:${event.timestamp ?? ''}`;
@@ -459,7 +484,13 @@ export class AgentWatcher {
     await this.finalize(route, live, content);
   }
 
-  /** Фоллбек-доставка `message.added` (assistant) без стрима. */
+  /**
+   * Фоллбек-доставка `message.added` (assistant) без стрима.
+   *
+   * `message.added` может прийти **раньше** `stream.done` (и несёт контент,
+   * обрезанный ядром) — поэтому доставляем не сразу, а с grace-паузой:
+   * если за неё придёт стрим, отложенная доставка отменяется.
+   */
   private async onMessageAdded(
     sessionId: string,
     route: SessionRoute,
@@ -469,13 +500,70 @@ export class AgentWatcher {
     const content = str(data.content);
     if (!content) return;
     const messageIndex = num(data.message_index);
+    const streamId = streamIdOf(data);
+    // Уже финализировано стримом (или повтор) — огрызок не доставляем.
+    if (await this.isAnswerDelivered(sessionId, messageIndex, streamId)) return;
+    this.scheduleMessageAdded(sessionId, route, content, messageIndex, streamId);
+  }
+
+  /** Откладывает фоллбек-доставку `message.added` на grace-паузу. */
+  private scheduleMessageAdded(
+    sessionId: string,
+    route: SessionRoute,
+    content: string,
+    messageIndex: number | undefined,
+    streamId: string | undefined,
+  ): void {
+    this.cancelPendingAdded(sessionId);
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const timer = setTimeout(() => {
+      this.pendingAdded.delete(sessionId);
+      void this.flushMessageAdded(sessionId, route, content, messageIndex, streamId)
+        .catch((error) => {
+          this.log(
+            `[gateway] watcher: ошибка фоллбека message.added: ${errorMessage(error)}`,
+          );
+        })
+        .finally(settle);
+    }, ADDED_FALLBACK_GRACE_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.pendingAdded.set(sessionId, { timer, settled, settle });
+  }
+
+  /** По срабатыванию grace-паузы: повторная проверка дедупа и доставка. */
+  private async flushMessageAdded(
+    sessionId: string,
+    route: SessionRoute,
+    content: string,
+    messageIndex: number | undefined,
+    streamId: string | undefined,
+  ): Promise<void> {
+    if (await this.isAnswerDelivered(sessionId, messageIndex, streamId)) return;
     const key =
       messageIndex !== undefined
         ? `message:${sessionId}:${messageIndex}`
-        : `message-content:${sessionId}:${str(data.stream_id) ?? content.length}`;
+        : `message-content:${sessionId}:${streamId ?? content.length}`;
     if (await this.store.hasSent(key)) return;
     await this.store.markSent(key);
     await this.deliver(route, content);
+  }
+
+  /** Ответ уже доставлен стримом (по `message_index` либо `stream_id`)? */
+  private async isAnswerDelivered(
+    sessionId: string,
+    messageIndex: number | undefined,
+    streamId: string | undefined,
+  ): Promise<boolean> {
+    if (
+      messageIndex !== undefined &&
+      (await this.store.hasSent(`message:${sessionId}:${messageIndex}`))
+    ) {
+      return true;
+    }
+    return streamId !== undefined && (await this.store.hasSent(`stream:${streamId}`));
   }
 
   /** Стартует индикатор «Печатает…» для сессии (если ещё не запущен). */
@@ -693,24 +781,27 @@ export class AgentWatcher {
   }
 
   /**
-   * Готовые к отправке чанки. Для `parse_mode: 'html'` экранирование делается
-   * **до** нарезки, чтобы раздувание сущностями не приводило к потере контента;
-   * для `plain` поведение прежнее.
+   * Готовые к отправке чанки. Для `parse_mode: 'html'` Markdown ответа
+   * рендерится в Telegram-HTML, затем HTML безопасно режется на сообщения
+   * (теги/сущности не рвутся, баланс тегов сохраняется); для `plain` поведение
+   * прежнее.
    */
   private renderChunks(text: string): string[] {
     if (this.parseMode !== 'html') return chunkText(text);
-    return chunkHtmlText(escapeHtml(text));
+    return chunkHtmlText(markdownToTelegramHtml(text));
   }
 
   /**
-   * Готовит текст к отправке: экранирование HTML (при `parse_mode: html`) и
-   * обрезка до лимита Telegram с многоточием. Обрезка не рвёт HTML-сущность.
+   * Готовит текст к отправке. Для `plain` — как раньше; для `html` — рендерит
+   * Markdown в HTML и обрезает превью до лимита по отрендеренной разметке,
+   * закрывая открытые теги.
    */
   private renderText(text: string): string {
-    const body = this.parseMode === 'html' ? escapeHtml(text) : text;
-    if (body.length <= TELEGRAM_MESSAGE_LIMIT) return body;
-    const cut = body.slice(0, TELEGRAM_MESSAGE_LIMIT - 1).replace(/&[a-zA-Z#0-9]*$/, '');
-    return `${cut}…`;
+    if (this.parseMode !== 'html') {
+      if (text.length <= TELEGRAM_MESSAGE_LIMIT) return text;
+      return `${text.slice(0, TELEGRAM_MESSAGE_LIMIT - 1)}…`;
+    }
+    return truncateHtmlText(markdownToTelegramHtml(text));
   }
 
   /** Обновляет `lastOutboundMessageId` в привязке чата. */

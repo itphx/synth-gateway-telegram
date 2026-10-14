@@ -7,10 +7,24 @@ import type { TelegramClient } from '../bot-api/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GatewayStore } from './store.js';
-import { AgentWatcher, chunkText, escapeHtml, parseSseData, TELEGRAM_MESSAGE_LIMIT, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
+import { ADDED_FALLBACK_GRACE_MS, AgentWatcher, chunkHtmlText, chunkText, escapeHtml, markdownToTelegramHtml, parseSseData, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
 
 const CHAT_KEY = 'chat:telegram:123456789';
 const SESSION_ID = 'sess_1';
+
+/** Дисбаланс тега в HTML: открывающие минус закрывающие (0 — сбалансирован). */
+function countTag(html: string, name: string): number {
+  const opens = (html.match(new RegExp(`<${name}(?:\\s[^>]*)?>`, 'g')) ?? []).length;
+  const closes = (html.match(new RegExp(`</${name}>`, 'g')) ?? []).length;
+  return opens - closes;
+}
+
+/** Промис отложенной фоллбек-доставки сессии (разрешается после доставки/отмены). */
+function pendingSettled(w: AgentWatcher, sessionId = SESSION_ID): Promise<void> | undefined {
+  const map = (w as unknown as { pendingAdded: Map<string, { settled: Promise<void> }> })
+    .pendingAdded;
+  return map.get(sessionId)?.settled;
+}
 
 function makeClient(): {
   client: TelegramClient;
@@ -86,6 +100,130 @@ describe('chunkText', () => {
 describe('escapeHtml', () => {
   it('экранирует спецсимволы', () => {
     expect(escapeHtml('<b>&</b>')).toBe('&lt;b&gt;&amp;&lt;/b&gt;');
+  });
+});
+
+describe('markdownToTelegramHtml', () => {
+  it('экранирует HTML-инъекции', () => {
+    expect(markdownToTelegramHtml('<script>alert(1)</script>')).toBe(
+      '&lt;script&gt;alert(1)&lt;/script&gt;',
+    );
+  });
+
+  it('рендерит жирный, курсив, зачёркнутый и инлайн-код', () => {
+    expect(markdownToTelegramHtml('**жирный** и *курсив* ~~зачёркнутый~~ `код`')).toBe(
+      '<b>жирный</b> и <i>курсив</i> <s>зачёркнутый</s> <code>код</code>',
+    );
+    expect(markdownToTelegramHtml('__тоже жирный__ и _курсив_')).toBe(
+      '<b>тоже жирный</b> и <i>курсив</i>',
+    );
+  });
+
+  it('рендерит ссылки с экранированием href', () => {
+    expect(markdownToTelegramHtml('[Synth](https://example.com/a?x=1&y=2)')).toBe(
+      '<a href="https://example.com/a?x=1&amp;y=2">Synth</a>',
+    );
+    expect(markdownToTelegramHtml('[t](https://ex.com/a"b)')).toBe(
+      '<a href="https://ex.com/a&quot;b">t</a>',
+    );
+  });
+
+  it('рендерит заголовки, цитаты и горизонтальные линии', () => {
+    expect(markdownToTelegramHtml('## Заголовок')).toBe('<b>Заголовок</b>');
+    expect(markdownToTelegramHtml('> цитата\n> вторая')).toBe(
+      '<blockquote>цитата\nвторая</blockquote>',
+    );
+    expect(markdownToTelegramHtml('---')).toBe('———');
+    expect(markdownToTelegramHtml('- один\n- два')).toBe('• один\n• два');
+  });
+
+  it('рендерит фенсед-блок без языка и с языком', () => {
+    expect(markdownToTelegramHtml('```\nconst a = 1;\n```')).toBe('<pre>const a = 1;</pre>');
+    expect(markdownToTelegramHtml('```ts\nconst a = 1;\n```')).toBe(
+      '<pre><code class="language-ts">const a = 1;</code></pre>',
+    );
+  });
+
+  it('незакрытые маркеры остаются литералами (стриминг-толерантность)', () => {
+    expect(markdownToTelegramHtml('**незакрыт')).toBe('**незакрыт');
+    expect(markdownToTelegramHtml('*курсив без конца')).toBe('*курсив без конца');
+    expect(markdownToTelegramHtml('текст `код без конца')).toBe('текст `код без конца');
+    // Баланс тегов: ни одного открытого тега без закрытия.
+    expect(markdownToTelegramHtml('**bold** и **незакрыт')).toBe('<b>bold</b> и **незакрыт');
+  });
+
+  it('жирный может охватывать несколько строк', () => {
+    expect(markdownToTelegramHtml('**начало\nконец**')).toBe('<b>начало\nконец</b>');
+  });
+
+  it('экранирует спецсимволы внутри кода, но не трогает разметку', () => {
+    expect(markdownToTelegramHtml('`a && b < c`')).toBe('<code>a &amp;&amp; b &lt; c</code>');
+  });
+
+  it('не трогает идентификаторы с подчёркиваниями', () => {
+    expect(markdownToTelegramHtml('snake_case_name')).toBe('snake_case_name');
+  });
+});
+
+describe('chunkHtmlText', () => {
+  it('не режет короткий HTML', () => {
+    expect(chunkHtmlText('<b>привет</b>')).toEqual(['<b>привет</b>']);
+  });
+
+  it('не рвёт HTML-сущности', () => {
+    const text = '&amp;'.repeat(50);
+    for (const chunk of chunkHtmlText(text, 20)) {
+      expect(chunk.length).toBeLessThanOrEqual(20);
+      expect(chunk).not.toMatch(/&[a-zA-Z#0-9]*$/);
+    }
+  });
+
+  it('закрывает и заново открывает теги на границе чанка', () => {
+    const text = `<b>${'x'.repeat(100)}</b>`;
+    const chunks = chunkHtmlText(text, 40);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(40);
+      expect(countTag(chunk, 'b')).toBe(0);
+    }
+    // Все текст-символы сохранены (служебные переоткрытия тегов убраны).
+    expect(chunks.join('').replace(/<\/?b>/g, '')).toBe(`x`.repeat(100));
+  });
+
+  it('сохраняет атрибуты при переоткрытии (ссылка)', () => {
+    const text = `<a href="https://example.com">${'y'.repeat(80)}</a>`;
+    const chunks = chunkHtmlText(text, 40);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(40);
+      const opens = (chunk.match(/<a href="https:\/\/example\.com">/g) ?? []).length;
+      const closes = (chunk.match(/<\/a>/g) ?? []).length;
+      expect(opens).toBe(closes);
+    }
+  });
+
+  it('не режет внутри тега', () => {
+    const text = `<b>${'z'.repeat(60)}</b>`;
+    for (const chunk of chunkHtmlText(text, 20)) {
+      expect(chunk).not.toMatch(/<[^>]*$/);
+    }
+  });
+});
+
+describe('truncateHtmlText', () => {
+  it('возвращает короткий HTML как есть', () => {
+    expect(truncateHtmlText('<b>ok</b>')).toBe('<b>ok</b>');
+  });
+
+  it('обрезает и закрывает открытые теги в пределах лимита', () => {
+    const result = truncateHtmlText(`<b>${'x'.repeat(100)}`, 40);
+    expect(result.length).toBeLessThanOrEqual(40);
+    expect(result.endsWith('…</b>')).toBe(true);
+  });
+
+  it('не рвёт сущность при обрезке', () => {
+    const result = truncateHtmlText('&amp;'.repeat(50), 20);
+    expect(result.length).toBeLessThanOrEqual(20);
+    expect(result).not.toMatch(/&[a-zA-Z#0-9]*…$/);
   });
 });
 
@@ -165,14 +303,25 @@ describe('AgentWatcher.handleEvent', () => {
     expect(sendMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('фоллбек message.added (assistant) отправляет, если стрима не было', async () => {
-    await watcher().handleEvent({
-      type: 'message.added',
-      sessionId: SESSION_ID,
-      data: { role: 'assistant', content: 'без стрима', message_index: 9 },
-    });
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ text: 'без стрима' });
+  it('фоллбек message.added (assistant) доставляет после grace-паузы', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = watcher();
+      await w.handleEvent({
+        type: 'message.added',
+        sessionId: SESSION_ID,
+        data: { role: 'assistant', content: 'без стрима', message_index: 9 },
+      });
+      // Сразу ничего не отправляем — ждём, не придёт ли stream.done.
+      expect(sendMessage).not.toHaveBeenCalled();
+      const settled = pendingSettled(w);
+      await vi.advanceTimersByTimeAsync(ADDED_FALLBACK_GRACE_MS);
+      await settled;
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ text: 'без стрима' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('message.added не дублирует уже отправленный stream.done (по message_index)', async () => {
@@ -221,6 +370,28 @@ describe('AgentWatcher.handleEvent', () => {
       text: '&lt;b&gt;жирный&lt;/b&gt; &amp; Co',
       parseMode: 'HTML',
     });
+  });
+
+  it('parseMode html рендерит Markdown ответа', async () => {
+    await watcher('html').handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 'stream_md', content: '**жирный** и `код`' },
+    });
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      text: '<b>жирный</b> и <code>код</code>',
+      parseMode: 'HTML',
+    });
+  });
+
+  it('parseMode plain не рендерит Markdown', async () => {
+    await watcher('plain').handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 'stream_plain_md', content: '**жирный**' },
+    });
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ text: '**жирный**' });
+    expect(sendMessage.mock.calls[0]?.[0]).not.toHaveProperty('parseMode');
   });
 });
 
@@ -351,6 +522,20 @@ describe('AgentWatcher: стриминг и индикатор «Печатае�
       text: '&lt;b&gt;a&lt;/b&gt; &amp; b',
       parseMode: 'HTML',
     });
+  });
+
+  it('parseMode html: live-превью рендерит Markdown и закрывает теги при обрезке', async () => {
+    watcher = new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+      parseMode: 'html',
+    });
+    await chunk({ stream_id: 's1', content: `**${'x'.repeat(5000)}**` });
+    const text = sendMessage.mock.calls[0]?.[0]?.text as string;
+    expect(text.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    expect(text.startsWith('<b>')).toBe(true);
+    expect(text.endsWith('…</b>')).toBe(true);
   });
 
   it('parseMode html: экранирование не теряет контент (live-превью и финал)', async () => {
@@ -563,6 +748,102 @@ describe('AgentWatcher: стриминг и индикатор «Печатае�
     await expect(chunk({ stream_id: 's1', content: 'x' })).resolves.toBeUndefined();
     await chunk({ stream_id: 's1', content: 'y' });
     expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('AgentWatcher: фоллбек message.added с grace-паузой', () => {
+  let dir: string;
+  let store: GatewayStore;
+  let client: TelegramClient;
+  let sendMessage: ReturnType<typeof vi.fn>;
+  let watcher: AgentWatcher;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    dir = await mkdtemp(join(tmpdir(), 'gateway-added-'));
+    store = new GatewayStore(dir);
+    await store.init();
+    ({ client, sendMessage } = makeClient());
+    await store.setChatSession(CHAT_KEY, {
+      sessionId: SESSION_ID,
+      chatId: '123456789',
+      threadId: 7,
+      lastInboundMessageId: 42,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    watcher = new AgentWatcher({ baseUrl: 'http://127.0.0.1:5000/api/v2', client, store });
+  });
+
+  afterEach(async () => {
+    watcher.stop();
+    vi.useRealTimers();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const added = (data: Record<string, unknown>): Promise<void> =>
+    watcher.handleEvent({ type: 'message.added', sessionId: SESSION_ID, data });
+
+  it('message.added раньше stream.done → одно сообщение с полным контентом', async () => {
+    await added({
+      role: 'assistant',
+      content: 'огрызок',
+      message_index: 5,
+      metadata: { stream_id: 's7' },
+    });
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's7', content: 'полный ответ', message_index: 5 },
+    });
+    await vi.advanceTimersByTimeAsync(ADDED_FALLBACK_GRACE_MS * 2);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ text: 'полный ответ' });
+  });
+
+  it('stream.done раньше message.added → одно сообщение', async () => {
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's7', content: 'полный ответ', message_index: 5 },
+    });
+    await added({
+      role: 'assistant',
+      content: 'огрызок',
+      message_index: 5,
+      metadata: { stream_id: 's7' },
+    });
+    await vi.advanceTimersByTimeAsync(ADDED_FALLBACK_GRACE_MS * 2);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ text: 'полный ответ' });
+  });
+
+  it('только message.added → доставляется после grace-паузы', async () => {
+    await added({ role: 'assistant', content: 'без стрима', message_index: 9 });
+    expect(sendMessage).not.toHaveBeenCalled();
+    const settled = pendingSettled(watcher);
+    await vi.advanceTimersByTimeAsync(ADDED_FALLBACK_GRACE_MS);
+    await settled;
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ text: 'без стрима' });
+  });
+
+  it('message.added при уже отправленном stream:<id> → пропуск', async () => {
+    await store.markSent('stream:s7');
+    await added({
+      role: 'assistant',
+      content: 'огрызок',
+      message_index: 5,
+      metadata: { stream_id: 's7' },
+    });
+    await vi.advanceTimersByTimeAsync(ADDED_FALLBACK_GRACE_MS * 2);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('stop() гасит отложенную доставку', async () => {
+    await added({ role: 'assistant', content: 'без стрима', message_index: 9 });
+    watcher.stop();
+    await vi.advanceTimersByTimeAsync(ADDED_FALLBACK_GRACE_MS * 2);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
 

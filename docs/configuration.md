@@ -37,7 +37,7 @@ CLI-флаг  >  env  >  файл secrets/  >  значение по умолч�
 | `GATEWAY_SECRETS_DIR` | `<repo>/secrets` | Каталог секрет-файлов |
 | `GATEWAY_DRY_RUN` | вычисляется по наличию токена | Форсировать dry-run |
 | `GATEWAY_WATCH` | `true` | Поднимать ли watcher ответов агента (SSE) |
-| `GATEWAY_PARSE_MODE` | `plain` | Отправка ответов: `plain` \| `html` (escape + `parse_mode: 'HTML'`) |
+| `GATEWAY_PARSE_MODE` | `plain` | Отправка ответов: `plain` \| `html` (Markdown → Telegram-HTML + `parse_mode: 'HTML'`) |
 | `GATEWAY_UNKNOWN_ACTION` | `register` | Политика неизвестного отправителя: `register` \| `hint` \| `reject` |
 | `GATEWAY_POLL_TIMEOUT_SEC` | `30` | Таймаут long-polling `getUpdates`, сек (запросный таймаут — long-poll + 15 с) |
 | `GATEWAY_REQUEST_TIMEOUT_SEC` | `30` | Таймаут обычных запросов Bot API, сек |
@@ -225,7 +225,7 @@ env TELEGRAM_PROXY_URL  >  ALL_PROXY  >  HTTPS_PROXY  >  HTTP_PROXY  >  secrets/
 | `oidcTokenUrl`/`oidcDiscoveryUrl`/`oidcClientId`/`oidcClientSecret`/`oidcScope` | нет | OIDC client-credentials |
 | `proxyUrl` | нет | Egress-прокси Bot API тенанта |
 | `allowlist` | нет | Строка `"chatId:ROLE,…"` **или** объект `{"chatId":"ROLE"}` |
-| `parseMode` | нет | `plain` (дефолт) \| `html` |
+| `parseMode` | нет | `plain` (дефолт) \| `html` (рендер Markdown ответа в Telegram-HTML) |
 | `unknownAction` | нет | `register` \| `hint` \| `reject` |
 | `watch` | нет | Поднимать ли watcher ответов (SSE) |
 | `pollTimeoutSec` / `requestTimeoutSec` | нет | Таймауты Bot API, сек |

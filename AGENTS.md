@@ -43,7 +43,7 @@ Telegram-бот ↔ платформа внешних событий (`POST /api
 ## Структура
 
 ```text
-src/gateway/   # bin synth-gateway-telegram — сервис (поллер, нормализация, ingest, watcher, health, хранилище)
+src/gateway/   # bin synth-gateway-telegram — сервис (поллер, нормализация, ingest, watcher, markdown→Telegram-HTML, health, хранилище)
 src/mcp/       # bin synth-gateway-tg — MCP-сервер (stdio), тулы tg_*
 src/bot-api/   # клиент Telegram Bot API (fetch + прокси), типы из @grammyjs/types
 ```
