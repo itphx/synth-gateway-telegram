@@ -88,7 +88,13 @@ interface LiveStream {
   draftId?: number;
   /** Rich-режим: время последнего черновика (троттлинг). */
   lastDraftAt?: number;
-  /** Rich-вызов отклонён — стрим переведён на html-фоллбек. */
+  /**
+   * Rich-режим: черновики недоступны/отклонены — больше не шлём их (стрим
+   * держит только «Печатает…»). На финал не влияет: он всё равно пробует
+   * `sendRichMessage`.
+   */
+  richDraftsDisabled?: boolean;
+  /** Rich-финал отклонён — стрим переведён на html-фоллбек. */
   richFallback?: boolean;
   typingTimer?: ReturnType<typeof setInterval>;
   finalized: boolean;
@@ -200,11 +206,12 @@ export function escapeHtml(text: string): string {
  * (`GatewayStore.sent`).
  *
  * Режим `parseMode: 'markdown'` (Bot API 10.1 «Rich Messages»): стриминг —
- * эфемерным черновиком (`sendRichMessageDraft`, только приватные чаты), финал —
+ * эфемерным черновиком (`sendRichMessageDraft`, только приватные чаты; канал
+ * необязательный — его сбой лишь отключает черновики), финал —
  * `sendRichMessage` полным Markdown (нативные таблицы/заголовки/списки). Если
- * rich-вызов отклонён либо текст > {@link RICH_MESSAGE_LIMIT} — откат на
- * html-рендер (`markdownToTelegramHtml` + чанки ≤4096). Ошибки Telegram не
- * роняют watcher.
+ * **финальный** rich-вызов отклонён либо текст > {@link RICH_MESSAGE_LIMIT} —
+ * откат на html-рендер (`markdownToTelegramHtml` + чанки ≤4096). Ошибки
+ * Telegram не роняют watcher.
  */
 export class AgentWatcher {
   private readonly baseUrl: string;
@@ -703,14 +710,14 @@ export class AgentWatcher {
    *
    * В rich-режиме live — это черновик (`sendRichMessageDraft`): в приватном
    * чате он стримится, в группе черновики недоступны и остаётся только
-   * «Печатает…». Если rich-вызов отклонён (лимит/неподдерживаемый контент) —
-   * стрим откатывается на обычный html-путь.
+   * «Печатает…». Проблемы черновика (пустой контент, лимит, сбой) его лишь
+   * отключают — на html-путь стрим не переводится: финал всё равно
+   * попробует `sendRichMessage` (постоянный фоллбек — только по его сбою).
    */
   private async flushLive(route: SessionRoute, live: LiveStream, force: boolean): Promise<void> {
     if (this.parseMode === 'markdown' && !live.richFallback) {
-      if (await this.flushRichDraft(route, live, force)) return;
-      // rich недоступен для этого стрима — дальше обычный (html) путь.
-      live.richFallback = true;
+      await this.flushRichDraft(route, live, force);
+      return;
     }
     const body = this.renderLive(live);
     if (body === live.rendered) return;
@@ -738,22 +745,32 @@ export class AgentWatcher {
   }
 
   /**
-   * Стримит черновик rich-сообщения (`sendRichMessageDraft`). Возвращает
-   * `true`, если rich-путь обработан (в т. ч. когда черновики недоступны — не
-   * приватный чат); `false` — rich-вызов отклонён, нужен html-фоллбек.
+   * Стримит черновик rich-сообщения (`sendRichMessageDraft`). Черновики —
+   * необязательный эфемерный канал: любая проблема (недоступность, пустой
+   * контент, лимит, отказ Telegram) лишь прекращает их отправку
+   * ({@link LiveStream.richDraftsDisabled}); постоянный фоллбек выставляет
+   * только сбой финального `sendRichMessage`.
    */
   private async flushRichDraft(
     route: SessionRoute,
     live: LiveStream,
     force: boolean,
-  ): Promise<boolean> {
+  ): Promise<void> {
+    if (live.richDraftsDisabled) return;
     // Черновики Bot API доступны только в приватных чатах; в группе — только
     // индикатор «Печатает…» и финальная отправка.
-    if (!isPrivateChatId(route.chatId)) return true;
+    if (!isPrivateChatId(route.chatId)) {
+      live.richDraftsDisabled = true;
+      return;
+    }
     const markdown = live.note ? `${live.text}\n\n${live.note}` : live.text;
-    // Текст не влезает в rich-лимит — не рискуем, сразу html-фоллбек.
-    if (markdown.length > RICH_MESSAGE_LIMIT) return false;
-    if (markdown === live.rendered) return true;
+    // Контента ещё нет (первые чанки бывают пробельными): Telegram считает
+    // пустое rich-сообщение ошибкой (400 RICH_MESSAGE_EMPTY) — не шлём.
+    if (markdown.trim() === '') return;
+    // Текст не влезает в rich-лимит — черновик не шлём; решение примет финал
+    // (там oversize → html-фоллбек).
+    if (markdown.length > RICH_MESSAGE_LIMIT) return;
+    if (markdown === live.rendered) return;
 
     const now = Date.now();
     if (
@@ -761,14 +778,18 @@ export class AgentWatcher {
       live.draftId !== undefined &&
       now - (live.lastDraftAt ?? 0) < RICH_DRAFT_THROTTLE_MS
     ) {
-      return true;
+      return;
     }
     const draftId = live.draftId ?? draftIdOf(live.streamId ?? route.chatId);
-    if (!(await this.sendRichDraft(route, draftId, markdown))) return false;
+    if (!(await this.sendRichDraft(route, draftId, markdown))) {
+      // Черновик отклонён (валидация/несовместимость rich) — прекращаем слать
+      // дальнейшие, но стрим остаётся rich: финал пробуется как обычно.
+      live.richDraftsDisabled = true;
+      return;
+    }
     live.draftId = draftId;
     live.lastDraftAt = now;
     live.rendered = markdown;
-    return true;
   }
 
   /** Отправляет черновик rich-сообщения; ошибки Telegram не бросаются. */
@@ -783,7 +804,6 @@ export class AgentWatcher {
         draftId,
         richMessage: { markdown },
         ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
-        canStop: true,
       });
       if (response.ok === false) {
         this.log(

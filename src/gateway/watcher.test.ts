@@ -1111,8 +1111,10 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
       chatId: 123456789,
       richMessage: { markdown: '# Заголовок\n' },
       messageThreadId: 7,
-      canStop: true,
     });
+    // Кнопка «стоп» в черновике не шлётся: апдейт `stopped_message_generation`
+    // шлюз не обрабатывает — остановка только командой `/stop`.
+    expect(sendRichMessageDraft.mock.calls[0]?.[0]).not.toHaveProperty('canStop');
     // Живой текст в rich-режиме обычным сообщением не шлётся.
     expect(sendMessage).not.toHaveBeenCalled();
 
@@ -1188,6 +1190,10 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
 
   it('текст > 32768 символов не идёт в rich — html-фоллбек с чанками', async () => {
     const content = 'a'.repeat(RICH_MESSAGE_LIMIT + 1);
+    // На стриме oversize черновики не шлются (и html live тоже — решение за финалом).
+    await chunk({ stream_id: 's1', content });
+    expect(sendRichMessageDraft).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
     await done({ stream_id: 's1', content, message_index: 7 });
     // rich-вызов даже не делается — сразу html-путь.
     expect(sendRichMessage).not.toHaveBeenCalled();
@@ -1226,35 +1232,46 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
     });
   });
 
-  it('черновик отклонён Telegram → стрим переходит на html-фоллбек', async () => {
+  it('пустой/пробельный накопленный текст не шлётся черновиком', async () => {
+    await chunk({ stream_id: 's1', content: '\n' });
+    await chunk({ stream_id: 's1', content: '   ' });
+    // Telegram отклонил бы пустой rich-черновик (RICH_MESSAGE_EMPTY) — не шлём.
+    expect(sendRichMessageDraft).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    // Первый содержательный чанк — черновик уходит уже с накопленным текстом.
+    await chunk({ stream_id: 's1', content: 'ок' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
+    expect(sendRichMessageDraft.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: '\n   ок' },
+    });
+  });
+
+  it('сбой черновика не переводит стрим на html: дальнейшие черновики не шлются, финал — rich', async () => {
     sendRichMessageDraft.mockResolvedValueOnce({
       ok: false,
       error_code: 400,
-      description: 'bad rich draft',
+      description: 'Bad Request: RICH_MESSAGE_EMPTY',
     });
     await chunk({ stream_id: 's1', content: '**жирный**' });
-    // Первый черновик отклонён → сразу html live-сообщение.
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
-      text: '<b>жирный</b>',
-      parseMode: 'HTML',
-    });
+    // Черновик отклонён — html live-сообщение не шлётся, только «Печатает…».
+    expect(sendMessage).not.toHaveBeenCalled();
 
-    // Дальнейшие чанки идут html-правками, черновики больше не шлются.
+    // Канал черновиков отключён: дальнейшие чанки не шлют ни черновиков, ни html.
     sendRichMessageDraft.mockClear();
     await vi.advanceTimersByTimeAsync(1500);
     await chunk({ stream_id: 's1', content: ' и ещё' });
     expect(sendRichMessageDraft).not.toHaveBeenCalled();
-    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(editMessageText).not.toHaveBeenCalled();
 
-    // Финал — html-правка live-сообщения, rich не задействован.
-    sendRichMessage.mockClear();
+    // Финал всё равно rich: sendRichMessage, не html.
     await done({ stream_id: 's1', content: '**жирный** и ещё', message_index: 8 });
-    expect(sendRichMessage).not.toHaveBeenCalled();
-    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
-      text: '<b>жирный</b> и ещё',
-      parseMode: 'HTML',
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: '**жирный** и ещё' },
     });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('message.added (фоллбек без стрима) доставляется rich-сообщением', async () => {
