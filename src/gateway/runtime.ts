@@ -9,6 +9,7 @@ import { CommandHandler, type CommandHandlerOptions } from './command-handler.js
 import { tenantStoreDir, type GatewayConfig, type TenantConfig } from './config.js';
 import type { GatewayHealth } from './health.js';
 import { SynthHealthProbe, type SynthHealthProbeOptions } from './health-probe.js';
+import { InboundRegistry } from './inbound.js';
 import { SynthEventsClient, type SynthEventsClientOptions } from './ingest.js';
 import { Poller, type PollerOptions } from './poller.js';
 import { GatewayStore } from './store.js';
@@ -61,6 +62,8 @@ export interface TenantRuntimeDeps {
   createCommands?: (options: CommandHandlerOptions) => CommandHandler;
   createPoller?: (options: PollerOptions) => Poller;
   createWatcher?: (options: WatcherOptions) => AgentWatcher;
+  /** Реестр входящих тенанта (seam для тестов); по умолчанию — новый экземпляр. */
+  createInbound?: () => InboundRegistry;
   createHealthProbe?: (options: SynthHealthProbeOptions) => SynthHealthProbe;
   resolveIdentity?: BotIdentityResolver;
 }
@@ -157,6 +160,11 @@ export async function createTenantRuntime(
 
   const identity = await (deps.resolveIdentity ?? resolveBotIdentity)(client, health, log);
 
+  // Реестр входящих — один на тенант: поллер кладёт `dedupKey → messageId`,
+  // watcher привязывает к ним `stream_id` ответа и отвечает reply-ем на
+  // сообщение-источник прогона (см. InboundRegistry).
+  const inbound = (deps.createInbound ?? (() => new InboundRegistry()))();
+
   const poller = (deps.createPoller ?? ((options) => new Poller(options)))({
     client,
     events,
@@ -165,6 +173,7 @@ export async function createTenantRuntime(
     allowlist: tenant.allowlist,
     unknownAction: tenant.unknownAction,
     pollTimeoutSec: tenant.pollTimeoutSec,
+    inbound,
     ...identity,
     log,
   });
@@ -178,6 +187,7 @@ export async function createTenantRuntime(
           client,
           store,
           parseMode: tenant.parseMode,
+          inbound,
           health,
           log,
         })

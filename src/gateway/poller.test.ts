@@ -1,6 +1,7 @@
 import type { BotApiResponse, TelegramClient, Update } from '../bot-api/index.js';
 import { describe, expect, it, vi } from 'vitest';
 
+import { InboundRegistry } from './inbound.js';
 import type { SynthEventsClient } from './ingest.js';
 import type { EventIdentity } from './normalize.js';
 import { Poller } from './poller.js';
@@ -45,6 +46,7 @@ function makePolicyPoller(options: {
   store?: GatewayStore;
   log?: (message: string) => void;
   isSenderKnown?: (identity: EventIdentity) => boolean | Promise<boolean>;
+  inbound?: InboundRegistry;
 }): Poller {
   return new Poller({
     client: options.client as unknown as TelegramClient,
@@ -54,6 +56,7 @@ function makePolicyPoller(options: {
     errorBackoffMs: 1,
     ...(options.unknownAction ? { unknownAction: options.unknownAction } : {}),
     ...(options.isSenderKnown ? { isSenderKnown: options.isSenderKnown } : {}),
+    ...(options.inbound ? { inbound: options.inbound } : {}),
     ...(options.log ? { log: options.log } : {}),
   });
 }
@@ -379,5 +382,33 @@ describe('Poller (ошибки и останов)', () => {
 
     expect(store.seen.has(7)).toBe(true);
     expect(store.offsets.at(-1)).toBe(8);
+  });
+});
+
+describe('Poller: реестр входящих (reply на сообщение-источник)', () => {
+  it('после успешной публикации запоминает dedupKey → messageId', async () => {
+    const { client } = textUpdateClient();
+    const postEvent = vi.fn(async () => ({ decision: { kind: 'bind' }, sessionId: null }));
+    const inbound = new InboundRegistry();
+    const poller = makePolicyPoller({ client, events: { postEvent }, inbound });
+
+    await poller.runOnce();
+
+    expect(postEvent).toHaveBeenCalledTimes(1);
+    // `botId`/`botUsername` не заданы → фоллбек `bot`; message_id апдейта — 5.
+    expect(inbound.inboundMessageId('telegram:bot:100')).toBe(5);
+  });
+
+  it('при сбое публикации входящее НЕ запоминается', async () => {
+    const { client } = textUpdateClient();
+    const postEvent = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    const inbound = new InboundRegistry();
+    const poller = makePolicyPoller({ client, events: { postEvent }, inbound });
+
+    await poller.runOnce();
+
+    expect(inbound.inboundMessageId('telegram:bot:100')).toBeUndefined();
   });
 });

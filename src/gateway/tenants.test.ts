@@ -17,12 +17,13 @@ import {
 } from './config.js';
 import { aggregateHealth, GatewayHealthRegistry, type HealthSnapshot } from './health.js';
 import type { SynthHealthProbe } from './health-probe.js';
+import { InboundRegistry } from './inbound.js';
 import type { SynthEventsClient } from './ingest.js';
 import type { Poller, PollerOptions } from './poller.js';
 import { createTenantRuntime } from './runtime.js';
 import { createApp } from './server.js';
 import { GatewayStore } from './store.js';
-import type { AgentWatcher } from './watcher.js';
+import type { AgentWatcher, WatcherOptions } from './watcher.js';
 
 /** Пустой каталог секретов: изолирует тесты от реального `secrets/`. */
 let emptySecretsDir: string;
@@ -464,6 +465,63 @@ describe('fan-out рантаймов тенантов (seam, без сети)', 
       });
       expect(storeDirs).toEqual([dataDir]);
     } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('реестр входящих — один на тенант, общий для поллера и watcher-а', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'gateway-inbound-'));
+    const tf = writeTenants(
+      JSON.stringify({
+        tenants: [
+          { id: 'dev', botToken: 'dev-token', allowlist: 'dev:ADMIN' },
+          { id: 'test', botToken: 'test-token', allowlist: 'test:LEAD' },
+        ],
+      }),
+    );
+    try {
+      const config = load({}, { tenantsFile: tf.path, dataDir });
+      const registry = new GatewayHealthRegistry();
+      const pollerInbound: Array<InboundRegistry | undefined> = [];
+      const watcherInbound: Array<InboundRegistry | undefined> = [];
+
+      for (const tenant of config.tenants) {
+        await createTenantRuntime(config, tenant, true, {
+          health: registry.register(tenant.id),
+          log: () => {},
+          isLegacy: false,
+          createStore: () => ({ init: async () => {} }) as unknown as GatewayStore,
+          createAuth: () =>
+            ({ mode: 'service-key', check: async () => 'ok' }) as unknown as AuthTokenProvider,
+          createClient: () =>
+            ({ dryRun: false, close: () => {} }) as unknown as TelegramClient,
+          createEvents: () => ({}) as SynthEventsClient,
+          createCommands: () => ({}) as CommandHandler,
+          createPoller: (options) => {
+            pollerInbound.push(options.inbound);
+            return {
+              run: async () => {},
+              runOnce: async () => {},
+              stop: () => {},
+            } as unknown as Poller;
+          },
+          createWatcher: (options: WatcherOptions) => {
+            watcherInbound.push(options.inbound);
+            return {} as AgentWatcher;
+          },
+          resolveIdentity: async () => ({}),
+        });
+      }
+
+      expect(pollerInbound).toHaveLength(2);
+      // Один реестр на тенант, общий для поллера и watcher-а…
+      expect(pollerInbound[0]).toBeInstanceOf(InboundRegistry);
+      expect(pollerInbound[0]).toBe(watcherInbound[0]);
+      expect(pollerInbound[1]).toBe(watcherInbound[1]);
+      // …и у разных тенантов — независимые.
+      expect(pollerInbound[0]).not.toBe(pollerInbound[1]);
+    } finally {
+      tf.cleanup();
       rmSync(dataDir, { recursive: true, force: true });
     }
   });

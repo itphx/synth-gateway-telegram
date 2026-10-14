@@ -2,6 +2,7 @@ import type { TelegramClient, Update } from '../bot-api/index.js';
 
 import type { CommandHandler } from './command-handler.js';
 import { DEFAULT_POLL_TIMEOUT_SEC } from './config.js';
+import type { InboundRegistry } from './inbound.js';
 import type { IngestResult, SynthEventsClient } from './ingest.js';
 import { normalizeUpdate, type NormalizeContext, type SynthEventInput } from './normalize.js';
 import type { GatewayStore } from './store.js';
@@ -50,6 +51,12 @@ export interface PollerOptions {
   pollTimeoutSec?: number;
   /** Базовая пауза backoff при ошибках `getUpdates`, мс (по умолчанию 3000). */
   errorBackoffMs?: number;
+  /**
+   * Реестр входящих (per-tenant): после публикации события шлюз фиксирует
+   * `dedupKey → messageId`, чтобы watcher ответил reply-ем на сообщение-источник
+   * прогона, а не на последнее пришедшее (см. {@link InboundRegistry}).
+   */
+  inbound?: InboundRegistry;
   log?: (message: string) => void;
 }
 
@@ -91,6 +98,7 @@ export class Poller {
   private readonly log: (message: string) => void;
   private readonly unknownAction: UnknownAction;
   private readonly isSenderKnown: SenderKnownResolver;
+  private readonly inbound?: InboundRegistry;
   private readonly memorySeen = new Set<number>();
   private controller?: AbortController;
   private stopped = false;
@@ -109,6 +117,7 @@ export class Poller {
     this.errorBackoffMs = options.errorBackoffMs ?? ERROR_BACKOFF_MS;
     this.unknownAction = options.unknownAction ?? DEFAULT_UNKNOWN_ACTION;
     this.isSenderKnown = options.isSenderKnown ?? unknownSenderResolver;
+    this.inbound = options.inbound;
     this.log = options.log ?? (() => {});
   }
 
@@ -206,6 +215,10 @@ export class Poller {
 
       const result = await this.postEvent(event, updateId);
       if (result) {
+        // Фиксируем `dedupKey → messageId` при любом решении Router: watcher
+        // свяжет это входящее со стримом ответа (`message.added(user)`) и
+        // ответит reply-ем на него, даже если позже придут другие сообщения.
+        this.inbound?.rememberInbound(event.dedupKey, event.payload.messageId);
         await this.rememberSession(event, result.sessionId);
         // Политика `hint`: событие уже опубликовано; сопоставление отправителя
         // резолвит ядро. Публикацию **не** блокируем. Если ядро вернуло

@@ -6,6 +6,7 @@ import type { TelegramClient } from '../bot-api/index.js';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { InboundRegistry } from './inbound.js';
 import { GatewayStore } from './store.js';
 import { ADDED_FALLBACK_GRACE_MS, AgentWatcher, chunkHtmlText, chunkText, escapeHtml, isPrivateChatId, markdownToTelegramHtml, parseSseData, RICH_DRAFT_MAX_FAILURES, RICH_DRAFT_THROTTLE_MS, RICH_MESSAGE_LIMIT, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
 
@@ -1414,5 +1415,229 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
     ).resolves.toBeUndefined();
     // rich упал — доставили html-фоллбеком.
     expect(sendMessage).toHaveBeenCalled();
+  });
+});
+
+describe('AgentWatcher: адресат reply по стриму (реестр входящих)', () => {
+  let dir: string;
+  let store: GatewayStore;
+  let client: TelegramClient;
+  let sendMessage: ReturnType<typeof vi.fn>;
+  let inbound: InboundRegistry;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    dir = await mkdtemp(join(tmpdir(), 'gateway-reply-'));
+    store = new GatewayStore(dir);
+    await store.init();
+    ({ client, sendMessage } = makeClient());
+    await store.setChatSession(CHAT_KEY, {
+      sessionId: SESSION_ID,
+      chatId: '123456789',
+      threadId: 7,
+      lastInboundMessageId: 42,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    inbound = new InboundRegistry();
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function watcher(parseMode: 'plain' | 'markdown' = 'plain'): AgentWatcher {
+    return new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+      parseMode,
+      inbound,
+    });
+  }
+
+  /** `message.added(user)` с metadata прогона (`dedup_key` + `stream_id`). */
+  const linkUser = (w: AgentWatcher, dedupKey: string, streamId: string): Promise<void> =>
+    w.handleEvent({
+      type: 'message.added',
+      sessionId: SESSION_ID,
+      data: {
+        role: 'user',
+        content: 'вопрос',
+        metadata: { dedup_key: dedupKey, stream_id: streamId },
+      },
+    });
+
+  const done = (
+    w: AgentWatcher,
+    streamId: string,
+    content: string,
+    messageIndex: number,
+  ): Promise<void> =>
+    w.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: streamId, content, message_index: messageIndex },
+    });
+
+  /** Ответы Telegram по порядку: текст + адресат reply. */
+  const replies = (): Array<{ text: string; replyToMessageId?: number }> =>
+    sendMessage.mock.calls.map((call) => call[0] as { text: string; replyToMessageId?: number });
+
+  it('message.added(user) связывает стрим с сообщением-источником → reply на него', async () => {
+    const w = watcher();
+    inbound.rememberInbound('telegram:bot:100', 5);
+    await linkUser(w, 'telegram:bot:100', 's1');
+
+    await done(w, 's1', 'ответ', 1);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ replyToMessageId: 5 });
+  });
+
+  it('три сообщения во время ответа на 1-е: ответы 1→11, 2→22, 3→33 (не на последнее)', async () => {
+    const w = watcher();
+    inbound.rememberInbound('telegram:bot:1', 11);
+    inbound.rememberInbound('telegram:bot:2', 22);
+    inbound.rememberInbound('telegram:bot:3', 33);
+    await linkUser(w, 'telegram:bot:1', 's1');
+    await linkUser(w, 'telegram:bot:2', 's2');
+    await linkUser(w, 'telegram:bot:3', 's3');
+
+    // Пока шёл ответ, поллер перезаписал «последнее входящее» на самое новое.
+    await store.setChatSession(CHAT_KEY, {
+      sessionId: SESSION_ID,
+      chatId: '123456789',
+      threadId: 7,
+      lastInboundMessageId: 33,
+      updatedAt: '2026-01-01T00:00:01.000Z',
+    });
+
+    await done(w, 's1', 'Ответ 1', 1);
+    await done(w, 's2', 'Ответ 2', 2);
+    await done(w, 's3', 'Ответ 3', 3);
+
+    expect(replies().map((r) => r.replyToMessageId)).toEqual([11, 22, 33]);
+  });
+
+  it('неизвестный стрим → fallback на route.lastInboundMessageId', async () => {
+    const w = watcher();
+    await done(w, 's-unknown', 'ответ', 1);
+
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ replyToMessageId: 42 });
+  });
+
+  it('message.added(user) без metadata не создаёт связь и не шлёт сообщений', async () => {
+    const w = watcher();
+    await w.handleEvent({
+      type: 'message.added',
+      sessionId: SESSION_ID,
+      data: { role: 'user', content: 'вопрос' },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await done(w, 's1', 'ответ', 1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ replyToMessageId: 42 });
+  });
+
+  it('dedup_key, неизвестный реестру, не создаёт связь → fallback', async () => {
+    const w = watcher();
+    await linkUser(w, 'telegram:bot:777', 's1');
+    await done(w, 's1', 'ответ', 1);
+
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ replyToMessageId: 42 });
+  });
+
+  it('live-сообщение (stream.chunk) отвечает на сообщение-источник своего стрима', async () => {
+    const w = watcher();
+    inbound.rememberInbound('telegram:bot:100', 7);
+    await linkUser(w, 'telegram:bot:100', 's1');
+
+    await w.handleEvent({
+      type: 'stream.chunk',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'частично' },
+    });
+
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      text: 'частично',
+      replyToMessageId: 7,
+    });
+  });
+
+  it('stream.error использует stream_id события → reply на его сообщение', async () => {
+    const w = watcher();
+    inbound.rememberInbound('telegram:bot:100', 8);
+    await linkUser(w, 'telegram:bot:100', 's1');
+
+    await w.handleEvent({
+      type: 'stream.error',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', error: 'сбой провайдера' },
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ replyToMessageId: 8 });
+  });
+
+  it('stream.cancelled использует stream_id события → reply на его сообщение', async () => {
+    const w = watcher();
+    inbound.rememberInbound('telegram:bot:100', 9);
+    await linkUser(w, 'telegram:bot:100', 's1');
+
+    await w.handleEvent({
+      type: 'stream.cancelled',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'частичный' },
+    });
+
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      text: 'частичный\n\n⏹ Остановлено',
+      replyToMessageId: 9,
+    });
+  });
+
+  it('rich-финал (sendRichMessage) отвечает на сообщение-источник стрима', async () => {
+    const sendRichMessage = vi.fn(async (params: Record<string, unknown>) => ({
+      ok: true,
+      dryRun: true,
+      result: { message_id: 500 },
+      ...params,
+    }));
+    const richClient = { ...(client as object), sendRichMessage } as unknown as TelegramClient;
+    inbound.rememberInbound('telegram:bot:100', 15);
+    const w = new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client: richClient,
+      store,
+      parseMode: 'markdown',
+      inbound,
+    });
+    await linkUser(w, 'telegram:bot:100', 's1');
+
+    await done(w, 's1', '**ответ**', 1);
+
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({ replyToMessageId: 15 });
+  });
+
+  it('без реестра (inbound не задан) поведение прежнее — fallback на маршрут', async () => {
+    const w = new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+    });
+    await w.handleEvent({
+      type: 'message.added',
+      sessionId: SESSION_ID,
+      data: {
+        role: 'user',
+        content: 'вопрос',
+        metadata: { dedup_key: 'telegram:bot:100', stream_id: 's1' },
+      },
+    });
+    await done(w, 's1', 'ответ', 1);
+
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({ replyToMessageId: 42 });
   });
 });

@@ -3,6 +3,7 @@ import type { BotApiResponse, TelegramClient } from '../bot-api/index.js';
 import type { BearerProvider } from './auth.js';
 import type { ParseMode } from './config.js';
 import type { GatewayHealth } from './health.js';
+import type { InboundRegistry } from './inbound.js';
 import { chunkHtmlText, markdownToTelegramHtml, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText } from './markdown.js';
 import type { GatewayStore, SessionRoute } from './store.js';
 
@@ -139,6 +140,12 @@ export interface WatcherOptions {
   client: TelegramClient;
   store: GatewayStore;
   parseMode?: ParseMode;
+  /**
+   * Реестр входящих (per-tenant): связывает `stream_id` прогона с сообщением-
+   * источником, чтобы reply-шапка ответа указывала на то сообщение, на которое
+   * агент отвечает, а не на последнее пришедшее (см. {@link InboundRegistry}).
+   */
+  inbound?: InboundRegistry;
   /** Реализация fetch (для тестов). */
   fetchImpl?: typeof fetch;
   /** Начальная пауза переподключения, мс (по умолчанию 1000). */
@@ -162,6 +169,13 @@ function streamIdOf(data: Record<string, unknown>): string | undefined {
   const metadata = data.metadata;
   if (typeof metadata !== 'object' || metadata === null) return undefined;
   return str((metadata as Record<string, unknown>).stream_id);
+}
+
+/** `dedup_key` из данных `message.added` (несётся в `metadata`). */
+function dedupKeyOf(data: Record<string, unknown>): string | undefined {
+  const metadata = data.metadata;
+  if (typeof metadata !== 'object' || metadata === null) return undefined;
+  return str((metadata as Record<string, unknown>).dedup_key);
 }
 
 function delay(ms: number): Promise<void> {
@@ -233,6 +247,7 @@ export class AgentWatcher {
   private readonly client: TelegramClient;
   private readonly store: GatewayStore;
   private readonly parseMode: ParseMode;
+  private readonly inbound?: InboundRegistry;
   private readonly fetchImpl: typeof fetch;
   private readonly backoffMs: number;
   private readonly maxBackoffMs: number;
@@ -258,6 +273,7 @@ export class AgentWatcher {
     this.client = options.client;
     this.store = options.store;
     this.parseMode = options.parseMode ?? 'plain';
+    this.inbound = options.inbound;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.backoffMs = options.backoffMs ?? 1000;
     this.maxBackoffMs = options.maxBackoffMs ?? 30_000;
@@ -481,7 +497,7 @@ export class AgentWatcher {
     this.markFinalized(streamId);
     this.finishLive(sessionId, live);
     const content = str(event.data.content) ?? live?.text ?? '';
-    await this.finalize(route, live, content, STOPPED_MARK);
+    await this.finalize(route, live, content, STOPPED_MARK, streamId);
   }
 
   /** `stream.error` — правка live-сообщения (если есть) либо новое уведомление. */
@@ -510,7 +526,7 @@ export class AgentWatcher {
         return;
       }
     }
-    await this.deliver(route, raw);
+    await this.deliver(route, raw, streamId);
   }
 
   /** `stream.done` — финал: live-сообщение редактируется полным контентом. */
@@ -549,7 +565,7 @@ export class AgentWatcher {
     if (messageIndex !== undefined) await this.store.markSent(`message:${sessionId}:${messageIndex}`);
     this.markFinalized(streamId);
     this.finishLive(sessionId, live);
-    await this.finalize(route, live, content);
+    await this.finalize(route, live, content, undefined, streamId);
   }
 
   /**
@@ -564,7 +580,16 @@ export class AgentWatcher {
     route: SessionRoute,
     data: Record<string, unknown>,
   ): Promise<void> {
-    if (str(data.role)?.toLowerCase() !== 'assistant') return;
+    const role = str(data.role)?.toLowerCase();
+    // `message.added(user)` — входящее сообщение прогона: связываем `stream_id`
+    // с сообщением-источником (`dedup_key → messageId` помнит поллер). Все
+    // доставки этого стрима ответят reply-ем на то сообщение, на которое агент
+    // отвечает, а не на последнее пришедшее.
+    if (role === 'user') {
+      this.linkInboundStream(data);
+      return;
+    }
+    if (role !== 'assistant') return;
     const content = str(data.content);
     if (!content) return;
     const messageIndex = num(data.message_index);
@@ -572,6 +597,31 @@ export class AgentWatcher {
     // Уже финализировано стримом (или повтор) — огрызок не доставляем.
     if (await this.isAnswerDelivered(sessionId, messageIndex, streamId)) return;
     this.scheduleMessageAdded(sessionId, route, content, messageIndex, streamId);
+  }
+
+  /**
+   * Связывает стрим прогона с сообщением-источником по `metadata.dedup_key` +
+   * `metadata.stream_id` события `message.added(user)`. Соответствие
+   * `dedupKey → messageId` положил поллер при публикации; если его нет (прямой
+   * прогон без события) — связь не создаётся, останется fallback на
+   * `SessionRoute.lastInboundMessageId`.
+   */
+  private linkInboundStream(data: Record<string, unknown>): void {
+    if (!this.inbound) return;
+    const streamId = streamIdOf(data);
+    const dedupKey = dedupKeyOf(data);
+    if (!streamId || !dedupKey) return;
+    const messageId = this.inbound.inboundMessageId(dedupKey);
+    if (messageId === undefined) return;
+    this.inbound.linkStream(streamId, messageId);
+  }
+
+  /**
+   * Адресат reply для отправки: сообщение-источник стрима (реестр входящих),
+   * иначе — последнее входящее маршрута (прямые/не-событийные прогоны).
+   */
+  private replyTarget(route: SessionRoute, streamId: string | undefined): number | undefined {
+    return this.inbound?.replyForStream(streamId) ?? route.lastInboundMessageId;
   }
 
   /** Откладывает фоллбек-доставку `message.added` на grace-паузу. */
@@ -616,7 +666,7 @@ export class AgentWatcher {
         : `message-content:${sessionId}:${streamId ?? content.length}`;
     if (await this.store.hasSent(key)) return;
     await this.store.markSent(key);
-    await this.deliver(route, content);
+    await this.deliver(route, content, streamId);
   }
 
   /** Ответ уже доставлен стримом (по `message_index` либо `stream_id`)? */
@@ -737,7 +787,7 @@ export class AgentWatcher {
     const now = Date.now();
 
     if (live.messageId === undefined) {
-      const id = await this.sendText(route, body);
+      const id = await this.sendText(route, body, live.streamId);
       if (id === undefined) return;
       live.messageId = id;
       live.lastEditAt = now;
@@ -861,16 +911,16 @@ export class AgentWatcher {
   private async sendRichFinal(
     route: SessionRoute,
     markdown: string,
+    streamId?: string,
   ): Promise<{ ok: boolean; messageId?: number }> {
     if (!markdown || markdown.length > RICH_MESSAGE_LIMIT) return { ok: false };
     try {
+      const replyTo = this.replyTarget(route, streamId);
       const response = await this.client.sendRichMessage({
         chatId: route.chatId,
         richMessage: { markdown },
         ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
-        ...(route.lastInboundMessageId !== undefined
-          ? { replyToMessageId: route.lastInboundMessageId }
-          : {}),
+        ...(replyTo !== undefined ? { replyToMessageId: replyTo } : {}),
       });
       if (response.ok === false) {
         this.log(
@@ -901,12 +951,13 @@ export class AgentWatcher {
     live: LiveStream | undefined,
     text: string,
     marker?: string,
+    streamId?: string,
   ): Promise<void> {
     const body = marker ? (text ? `${text}\n\n${marker}` : marker) : text;
     if (!body) return;
     // Rich-финал: черновик эфемерен — персистентно сохраняем через sendRichMessage.
     if (this.parseMode === 'markdown' && !live?.richFallback) {
-      const sent = await this.sendRichFinal(route, body);
+      const sent = await this.sendRichFinal(route, body, streamId);
       if (sent.ok) {
         await this.rememberOutbound(route, sent.messageId);
         return;
@@ -916,7 +967,7 @@ export class AgentWatcher {
     }
     const chunks = this.renderChunks(body);
     if (live?.messageId === undefined) {
-      await this.sendChunks(route, chunks);
+      await this.sendChunks(route, chunks, streamId);
       return;
     }
 
@@ -925,7 +976,7 @@ export class AgentWatcher {
     live.rendered = first;
     let lastMessageId = live.messageId;
     for (const chunk of chunks.slice(1)) {
-      const id = await this.sendText(route, chunk);
+      const id = await this.sendText(route, chunk, streamId);
       if (id !== undefined) lastMessageId = id;
     }
     await this.rememberOutbound(route, lastMessageId);
@@ -936,39 +987,51 @@ export class AgentWatcher {
    * rich-режиме сначала пробует `sendRichMessage`; при отклонении (или тексте
    * > лимита) откатывается на html-рендер с чанками.
    */
-  private async deliver(route: SessionRoute, text: string, live?: LiveStream): Promise<void> {
+  private async deliver(
+    route: SessionRoute,
+    text: string,
+    streamId?: string,
+    live?: LiveStream,
+  ): Promise<void> {
     if (this.parseMode === 'markdown' && !live?.richFallback) {
-      const sent = await this.sendRichFinal(route, text);
+      const sent = await this.sendRichFinal(route, text, streamId);
       if (sent.ok) {
         await this.rememberOutbound(route, sent.messageId);
         return;
       }
       if (live) live.richFallback = true;
     }
-    await this.sendChunks(route, this.renderChunks(text));
+    await this.sendChunks(route, this.renderChunks(text), streamId);
   }
 
   /** Отправляет готовые чанки по порядку (последний id — в состояние привязки). */
-  private async sendChunks(route: SessionRoute, chunks: string[]): Promise<void> {
+  private async sendChunks(
+    route: SessionRoute,
+    chunks: string[],
+    streamId?: string,
+  ): Promise<void> {
     let lastMessageId: number | undefined;
     for (const chunk of chunks) {
-      const id = await this.sendText(route, chunk);
+      const id = await this.sendText(route, chunk, streamId);
       if (id !== undefined) lastMessageId = id;
     }
     await this.rememberOutbound(route, lastMessageId);
   }
 
   /** Отправляет одно сообщение; ошибки Telegram логируются и не бросаются. */
-  private async sendText(route: SessionRoute, body: string): Promise<number | undefined> {
+  private async sendText(
+    route: SessionRoute,
+    body: string,
+    streamId?: string,
+  ): Promise<number | undefined> {
     try {
+      const replyTo = this.replyTarget(route, streamId);
       const response = await this.client.sendMessage({
         chatId: route.chatId,
         text: body,
         ...(this.parseMode !== 'plain' ? { parseMode: 'HTML' as const } : {}),
         ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
-        ...(route.lastInboundMessageId !== undefined
-          ? { replyToMessageId: route.lastInboundMessageId }
-          : {}),
+        ...(replyTo !== undefined ? { replyToMessageId: replyTo } : {}),
       });
       if (response.ok === false) {
         this.log(`[gateway] watcher: Telegram отклонил sendMessage: ${describeBotError(response)}`);
