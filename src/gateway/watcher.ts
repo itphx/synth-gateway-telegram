@@ -11,6 +11,9 @@ export const TELEGRAM_MESSAGE_LIMIT = 4096;
 /** Интервал повтора статуса «Печатает…», мс (Telegram держит статус ~5 c). */
 export const TYPING_INTERVAL_MS = 4000;
 
+/** Простой сессии, после которого индикатор «Печатает…» гасится сам, мс. */
+export const TYPING_MAX_IDLE_MS = 60_000;
+
 /** Минимальный интервал между правками live-сообщения, мс. */
 export const EDIT_THROTTLE_MS = 1500;
 
@@ -36,6 +39,8 @@ interface LiveStream {
   note?: string;
   /** Время последней правки live-сообщения (или её отложенного повтора при 429). */
   lastEditAt: number;
+  /** Время последнего события сессии (для watchdog индикатора «Печатает…»). */
+  lastActivityAt: number;
   /** Последний отправленный текст; правка не шлётся, если текст не изменился. */
   rendered?: string;
   typingTimer?: ReturnType<typeof setInterval>;
@@ -124,6 +129,33 @@ export function escapeHtml(text: string): string {
 }
 
 /**
+ * Режет **уже экранированный** для `parse_mode: 'HTML'` текст на сообщения не
+ * длиннее `limit`. В отличие от {@link chunkText}, учитывает раздувание текста
+ * HTML-сущностями: граница выбирается так, чтобы не разорвать сущность `&…;`.
+ */
+export function chunkHtmlText(text: string, limit: number = TELEGRAM_MESSAGE_LIMIT): string[] {
+  if (text.length <= limit) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > limit) {
+    // Предпочитаем границу строки, затем пробел, иначе — сам лимит.
+    let cut = rest.lastIndexOf('\n', limit);
+    if (cut <= 0) {
+      const space = rest.lastIndexOf(' ', limit);
+      cut = space > 0 ? space + 1 : limit;
+    }
+    // Не рвать HTML-сущность `&…;`: отступаем к её началу.
+    const amp = rest.lastIndexOf('&', cut - 1);
+    if (amp >= 0 && rest.indexOf(';', amp) >= cut) cut = amp > 0 ? amp : cut;
+    if (cut <= 0) cut = limit;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n/, '');
+  }
+  if (rest.length > 0) chunks.push(rest);
+  return chunks;
+}
+
+/**
  * Watcher ответов агента: слушает глобальный SSE `GET /events` и доставляет
  * ответы в чаты, привязанные к сессиям. Пока агент генерирует ответ, в чате
  * держится индикатор «Печатает…» и стримится live-сообщение (накопленный
@@ -169,6 +201,16 @@ export class AgentWatcher {
   stop(): void {
     this.stopped = true;
     this.controller?.abort();
+    this.resetLiveState();
+  }
+
+  /**
+   * Гасит все активные индикаторы и сбрасывает live-состояния сессий. Вызывается
+   * при обрыве/переподключении SSE: события, потерянные между соединениями, не
+   * восстановить, поэтому финал доставится как новое сообщение (дедуп-ключи не
+   * выставлены), а индикатор не остаётся висеть.
+   */
+  private resetLiveState(): void {
     for (const live of this.live.values()) this.clearTyping(live);
     this.live.clear();
   }
@@ -186,6 +228,7 @@ export class AgentWatcher {
         backoff = this.backoffMs;
       } catch (error) {
         this.health?.setWatcher('down');
+        this.resetLiveState();
         if (this.stopped) break;
         this.log(`[gateway] watcher ошибка: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -196,6 +239,9 @@ export class AgentWatcher {
   }
 
   private async connect(): Promise<void> {
+    // Обрыв/переподключение: события между соединениями потеряны — сбрасываем
+    // live-состояния и гасим индикаторы, чтобы они не зависли.
+    this.resetLiveState();
     const controller = new AbortController();
     this.controller = controller;
 
@@ -249,6 +295,7 @@ export class AgentWatcher {
         /* уже освобождён */
       }
       this.health?.setWatcher('down');
+      this.resetLiveState();
     }
   }
 
@@ -258,6 +305,9 @@ export class AgentWatcher {
     if (!sessionId) return;
     const route = await this.store.getSessionRoute(sessionId);
     if (!route) return;
+
+    const active = this.live.get(sessionId);
+    if (active) active.lastActivityAt = Date.now();
 
     switch (event.type) {
       case 'stream.start':
@@ -436,8 +486,14 @@ export class AgentWatcher {
 
   private startTypingFor(route: SessionRoute, live: LiveStream): void {
     if (live.finalized || live.typingTimer) return;
+    live.lastActivityAt = Date.now();
     void this.sendTyping(route);
     const timer = setInterval(() => {
+      // Watchdog: без событий по сессии индикатор «Печатает…» не висит вечно.
+      if (Date.now() - live.lastActivityAt > TYPING_MAX_IDLE_MS) {
+        this.clearTyping(live);
+        return;
+      }
       void this.sendTyping(route);
     }, TYPING_INTERVAL_MS);
     if (typeof timer.unref === 'function') timer.unref();
@@ -476,6 +532,7 @@ export class AgentWatcher {
       live = {
         text: '',
         lastEditAt: 0,
+        lastActivityAt: Date.now(),
         finalized: false,
         ...(streamId !== undefined ? { streamId } : {}),
       };
@@ -546,18 +603,18 @@ export class AgentWatcher {
   ): Promise<void> {
     const body = marker ? (text ? `${text}\n\n${marker}` : marker) : text;
     if (!body) return;
-    const chunks = chunkText(body);
+    const chunks = this.renderChunks(body);
     if (live?.messageId === undefined) {
       await this.deliver(route, body);
       return;
     }
 
-    const first = this.renderText(chunks[0] ?? '');
+    const first = chunks[0] ?? '';
     await this.safeEdit(route, live.messageId, first);
     live.rendered = first;
     let lastMessageId = live.messageId;
     for (const chunk of chunks.slice(1)) {
-      const id = await this.sendText(route, this.renderText(chunk));
+      const id = await this.sendText(route, chunk);
       if (id !== undefined) lastMessageId = id;
     }
     await this.rememberOutbound(route, lastMessageId);
@@ -566,8 +623,8 @@ export class AgentWatcher {
   /** Отправляет текст в чат маршрута (с чанкингом) и обновляет состояние. */
   private async deliver(route: SessionRoute, text: string): Promise<void> {
     let lastMessageId: number | undefined;
-    for (const chunk of chunkText(text)) {
-      const id = await this.sendText(route, this.renderText(chunk));
+    for (const chunk of this.renderChunks(text)) {
+      const id = await this.sendText(route, chunk);
       if (id !== undefined) lastMessageId = id;
     }
     await this.rememberOutbound(route, lastMessageId);
@@ -633,6 +690,16 @@ export class AgentWatcher {
   private renderLive(live: LiveStream): string {
     const text = live.note ? `${live.text}\n\n${live.note}` : live.text;
     return this.renderText(text);
+  }
+
+  /**
+   * Готовые к отправке чанки. Для `parse_mode: 'html'` экранирование делается
+   * **до** нарезки, чтобы раздувание сущностями не приводило к потере контента;
+   * для `plain` поведение прежнее.
+   */
+  private renderChunks(text: string): string[] {
+    if (this.parseMode !== 'html') return chunkText(text);
+    return chunkHtmlText(escapeHtml(text));
   }
 
   /**

@@ -7,7 +7,7 @@ import type { TelegramClient } from '../bot-api/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GatewayStore } from './store.js';
-import { AgentWatcher, chunkText, escapeHtml, parseSseData, TELEGRAM_MESSAGE_LIMIT } from './watcher.js';
+import { AgentWatcher, chunkText, escapeHtml, parseSseData, TELEGRAM_MESSAGE_LIMIT, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
 
 const CHAT_KEY = 'chat:telegram:123456789';
 const SESSION_ID = 'sess_1';
@@ -353,6 +353,58 @@ describe('AgentWatcher: стриминг и индикатор «Печатае�
     });
   });
 
+  it('parseMode html: экранирование не теряет контент (live-превью и финал)', async () => {
+    watcher = new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+      parseMode: 'html',
+    });
+    const content = '&'.repeat(3000) + 'КОНЕЦ';
+    // Живой путь: превью обрезается до лимита, но не рвёт HTML-сущность.
+    await chunk({ stream_id: 's1', content });
+    const live = sendMessage.mock.calls[0]?.[0]?.text as string;
+    expect(live.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    expect(live.endsWith('…')).toBe(true);
+    expect(live).not.toMatch(/&[a-zA-Z#0-9]*…$/);
+
+    // Финал: полный контент доставляется несколькими сообщениями без потерь.
+    sendMessage.mockClear();
+    editMessageText.mockClear();
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content, message_index: 3 },
+    });
+    const bodies = [
+      ...editMessageText.mock.calls.map((call) => (call[0] as { text: string }).text),
+      ...sendMessage.mock.calls.map((call) => (call[0] as { text: string }).text),
+    ];
+    expect(bodies.length).toBeGreaterThanOrEqual(2);
+    expect(bodies.join('')).toContain('КОНЕЦ');
+    expect(bodies.join('')).toContain('&amp;');
+    for (const body of bodies) expect(body.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+  });
+
+  it('parseMode html: финал без live (deliver) тоже не теряет контент', async () => {
+    watcher = new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+      parseMode: 'html',
+    });
+    const content = '&'.repeat(3000) + 'КОНЕЦ';
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content, message_index: 4 },
+    });
+    const bodies = sendMessage.mock.calls.map((call) => (call[0] as { text: string }).text);
+    expect(bodies.length).toBeGreaterThanOrEqual(2);
+    expect(bodies.join('')).toContain('КОНЕЦ');
+    for (const body of bodies) expect(body.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+  });
+
   it('stream.done редактирует live-сообщение полным контентом и дедуплицирует', async () => {
     await chunk({ stream_id: 's1', content: 'Часть' });
     await watcher.handleEvent({
@@ -511,6 +563,121 @@ describe('AgentWatcher: стриминг и индикатор «Печатае�
     await expect(chunk({ stream_id: 's1', content: 'x' })).resolves.toBeUndefined();
     await chunk({ stream_id: 's1', content: 'y' });
     expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('AgentWatcher: обрыв SSE и watchdog индикатора', () => {
+  let dir: string;
+  let store: GatewayStore;
+  let client: TelegramClient;
+  let sendChatAction: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    dir = await mkdtemp(join(tmpdir(), 'gateway-typing-'));
+    store = new GatewayStore(dir);
+    await store.init();
+    ({ client, sendChatAction } = makeClient());
+    await store.setChatSession(CHAT_KEY, {
+      sessionId: SESSION_ID,
+      chatId: '123456789',
+      threadId: 7,
+      lastInboundMessageId: 42,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function makeWatcher(fetchImpl?: typeof fetch): AgentWatcher {
+    return new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+      ...(fetchImpl ? { fetchImpl } : {}),
+    });
+  }
+
+  const liveSize = (w: AgentWatcher): number =>
+    (w as unknown as { live: Map<string, unknown> }).live.size;
+
+  const start = (w: AgentWatcher): Promise<void> =>
+    w.handleEvent({ type: 'stream.start', sessionId: SESSION_ID, data: { stream_id: 's1' } });
+
+  it('watchdog гасит индикатор после простоя сессии', async () => {
+    const w = makeWatcher();
+    await start(w);
+    expect(sendChatAction.mock.calls.length).toBeGreaterThan(0);
+
+    // До порога индикатор продолжает обновляться…
+    await vi.advanceTimersByTimeAsync(TYPING_MAX_IDLE_MS);
+    const calls = sendChatAction.mock.calls.length;
+    // …после простоя — самоостанавливается.
+    await vi.advanceTimersByTimeAsync(TYPING_MAX_IDLE_MS);
+    expect(sendChatAction).toHaveBeenCalledTimes(calls);
+    w.stop();
+  });
+
+  it('watchdog не мешает живому стриму (события продлевают индикатор)', async () => {
+    const w = makeWatcher();
+    await start(w);
+    await vi.advanceTimersByTimeAsync(TYPING_MAX_IDLE_MS - TYPING_INTERVAL_MS);
+    await w.handleEvent({ type: 'stream.retry', sessionId: SESSION_ID, data: { stream_id: 's1', attempt: 1 } });
+    const before = sendChatAction.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(TYPING_INTERVAL_MS * 2);
+    expect(sendChatAction.mock.calls.length).toBeGreaterThan(before);
+    w.stop();
+  });
+
+  it('обрыв SSE (finally connect) гасит таймеры и очищает live', async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({ type: 'stream.start', sessionId: SESSION_ID, data: { stream_id: 's1' } })}\n\n`,
+          ),
+        );
+        controller.close();
+      },
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(stream, { status: 200 }));
+    const w = makeWatcher(fetchImpl as unknown as typeof fetch);
+    await (w as unknown as { connect(): Promise<void> }).connect();
+
+    expect(sendChatAction.mock.calls.length).toBeGreaterThan(0);
+    expect(liveSize(w)).toBe(0);
+    const calls = sendChatAction.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sendChatAction).toHaveBeenCalledTimes(calls);
+  });
+
+  it('переподключение SSE сбрасывает live-состояние прошлого соединения', async () => {
+    const fetchImpl = vi.fn();
+    const w = makeWatcher(fetchImpl as unknown as typeof fetch);
+    await start(w);
+    expect(liveSize(w)).toBe(1);
+
+    const closed = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+    fetchImpl.mockResolvedValue(new Response(closed, { status: 200 }));
+    const connecting = (w as unknown as { connect(): Promise<void> }).connect();
+    // Старт connect синхронно сбрасывает состояние, не дожидаясь сети.
+    expect(liveSize(w)).toBe(0);
+    await connecting;
+    w.stop();
+  });
+
+  it('stop() гасит индикатор и очищает live', async () => {
+    const w = makeWatcher();
+    await start(w);
+    w.stop();
+    expect(liveSize(w)).toBe(0);
+    const calls = sendChatAction.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sendChatAction).toHaveBeenCalledTimes(calls);
   });
 });
 
