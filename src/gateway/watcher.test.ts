@@ -7,7 +7,7 @@ import type { TelegramClient } from '../bot-api/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GatewayStore } from './store.js';
-import { ADDED_FALLBACK_GRACE_MS, AgentWatcher, chunkHtmlText, chunkText, escapeHtml, isPrivateChatId, markdownToTelegramHtml, parseSseData, RICH_DRAFT_THROTTLE_MS, RICH_MESSAGE_LIMIT, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
+import { ADDED_FALLBACK_GRACE_MS, AgentWatcher, chunkHtmlText, chunkText, escapeHtml, isPrivateChatId, markdownToTelegramHtml, parseSseData, RICH_DRAFT_MAX_FAILURES, RICH_DRAFT_THROTTLE_MS, RICH_MESSAGE_LIMIT, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
 
 const CHAT_KEY = 'chat:telegram:123456789';
 const SESSION_ID = 'sess_1';
@@ -1097,6 +1097,25 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
     });
   }
 
+  /**
+   * Задаёт исходы `sendRichMessageDraft` по порядку вызовов (последний повторяется):
+   * `ok` — успех, `fail` — транзиентный сбой (5xx), `empty` — RICH_MESSAGE_EMPTY.
+   */
+  function setDraftOutcomes(outcomes: Array<'ok' | 'fail' | 'empty'>): void {
+    let index = 0;
+    sendRichMessageDraft.mockImplementation(async (params: Record<string, unknown>) => {
+      const outcome = outcomes[Math.min(index, outcomes.length - 1)] ?? 'ok';
+      index += 1;
+      if (outcome === 'empty') {
+        return { ok: false, error_code: 400, description: 'Bad Request: RICH_MESSAGE_EMPTY' };
+      }
+      if (outcome === 'fail') {
+        return { ok: false, error_code: 500, description: 'Internal Server Error' };
+      }
+      return { ok: true, dryRun: true, result: true, ...params };
+    });
+  }
+
   it('isPrivateChatId: положительный id — приватный, группы/каналы — нет', () => {
     expect(isPrivateChatId('123456789')).toBe(true);
     expect(isPrivateChatId('-1001234567890')).toBe(false);
@@ -1247,30 +1266,127 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
     });
   });
 
-  it('сбой черновика не переводит стрим на html: дальнейшие черновики не шлются, финал — rich', async () => {
-    sendRichMessageDraft.mockResolvedValueOnce({
-      ok: false,
-      error_code: 400,
-      description: 'Bad Request: RICH_MESSAGE_EMPTY',
-    });
+  it('RICH_MESSAGE_EMPTY — не сбой: следующий содержательный чанк шлёт черновик', async () => {
+    setDraftOutcomes(['empty', 'ok']);
     await chunk({ stream_id: 's1', content: '**жирный**' });
-    // Черновик отклонён — html live-сообщение не шлётся, только «Печатает…».
+    // «Показывать нечего» — черновик пропущен, html live-сообщение не шлётся.
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
     expect(sendMessage).not.toHaveBeenCalled();
 
-    // Канал черновиков отключён: дальнейшие чанки не шлют ни черновиков, ни html.
-    sendRichMessageDraft.mockClear();
-    await vi.advanceTimersByTimeAsync(1500);
+    // Канал не отключён: следующий содержательный чанк снова шлёт черновик.
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
     await chunk({ stream_id: 's1', content: ' и ещё' });
-    expect(sendRichMessageDraft).not.toHaveBeenCalled();
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(2);
+    expect(sendRichMessageDraft.mock.calls[1]?.[0]).toMatchObject({
+      richMessage: { markdown: '**жирный** и ещё' },
+    });
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(editMessageText).not.toHaveBeenCalled();
 
-    // Финал всё равно rich: sendRichMessage, не html.
+    // Финал всё равно rich.
     await done({ stream_id: 's1', content: '**жирный** и ещё', message_index: 8 });
     expect(sendRichMessage).toHaveBeenCalledTimes(1);
     expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
       richMessage: { markdown: '**жирный** и ещё' },
     });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('429 при черновике уважает retry_after: окно тишины, не фатал', async () => {
+    let calls = 0;
+    sendRichMessageDraft.mockImplementation(async (params: Record<string, unknown>) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: false,
+          error_code: 429,
+          description: 'Too Many Requests: retry after 5',
+          parameters: { retry_after: 5 },
+        };
+      }
+      return { ok: true, dryRun: true, result: true, ...params };
+    });
+    await chunk({ stream_id: 's1', content: 'a' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
+
+    // Внутри окна retry_after черновики не шлются.
+    await vi.advanceTimersByTimeAsync(1000);
+    await chunk({ stream_id: 's1', content: 'b' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
+
+    // После окна — снова шлём: 429 не фатален, канал жив.
+    await vi.advanceTimersByTimeAsync(5000);
+    await chunk({ stream_id: 's1', content: 'c' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(2);
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await done({ stream_id: 's1', content: 'abc', message_index: 14 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('один транзиентный сбой черновика не убивает стриминг', async () => {
+    setDraftOutcomes(['fail', 'ok', 'ok']);
+    await chunk({ stream_id: 's1', content: 'первый' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    // Сбой нестиккий: следующие черновики всё равно шлются.
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: ' второй' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: ' третий' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(3);
+    // Поток не переведён на html: обычных сообщений/правок нет.
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(editMessageText).not.toHaveBeenCalled();
+
+    await done({ stream_id: 's1', content: 'первый второй третий', message_index: 11 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('три последовательных сбоя отключают черновики, финал всё равно rich', async () => {
+    setDraftOutcomes(['fail']);
+    await chunk({ stream_id: 's1', content: 'a' });
+    await chunk({ stream_id: 's1', content: 'b' });
+    await chunk({ stream_id: 's1', content: 'c' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(RICH_DRAFT_MAX_FAILURES);
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    // Канал отключён: следующий чанк не шлёт ни черновика, ни html.
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: 'd' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(RICH_DRAFT_MAX_FAILURES);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(editMessageText).not.toHaveBeenCalled();
+
+    // Финал не зависит от сбоев черновиков — sendRichMessage, не html.
+    await done({ stream_id: 's1', content: 'abcd', message_index: 12 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: 'abcd' },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('успешный черновик сбрасывает счётчик: сбой, успех, сбой, сбой не отключает', async () => {
+    setDraftOutcomes(['fail', 'ok', 'fail', 'fail', 'ok']);
+    await chunk({ stream_id: 's1', content: '1' }); // сбой (1)
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: '2' }); // успех — сброс в 0
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: '3' }); // сбой (1)
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: '4' }); // сбой (2) — порог не достигнут
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: '5' }); // успех — черновики живы
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(5);
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await done({ stream_id: 's1', content: '12345', message_index: 13 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

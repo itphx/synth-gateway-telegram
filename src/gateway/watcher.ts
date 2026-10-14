@@ -31,6 +31,14 @@ export const EDIT_THROTTLE_MS = 1500;
 export const RICH_DRAFT_THROTTLE_MS = 1000;
 
 /**
+ * Сколько **последовательных** сбоев отправки черновика терпим, прежде чем
+ * отключить черновики на весь стрим. Сбои транзиентны (обрыв egress-прокси,
+ * `aborted`): единичный сбой не должен убивать стриминг — успешная отправка
+ * сбрасывает счётчик.
+ */
+export const RICH_DRAFT_MAX_FAILURES = 3;
+
+/**
  * Лимит rich-сообщения (Bot API 10.1): 32768 символов. Больше — rich-вызов
  * отклоняется, watcher откатывается на html-рендер с чанками ≤4096.
  */
@@ -91,9 +99,13 @@ interface LiveStream {
   /**
    * Rich-режим: черновики недоступны/отклонены — больше не шлём их (стрим
    * держит только «Печатает…»). На финал не влияет: он всё равно пробует
-   * `sendRichMessage`.
+   * `sendRichMessage`. Выставляется не с первого сбоя, а после
+   * {@link RICH_DRAFT_MAX_FAILURES} последовательных (см.
+   * {@link LiveStream.richDraftFailures}).
    */
   richDraftsDisabled?: boolean;
+  /** Rich-режим: счётчик последовательных сбоев черновиков (сброс при успехе). */
+  richDraftFailures?: number;
   /** Rich-финал отклонён — стрим переведён на html-фоллбек. */
   richFallback?: boolean;
   typingTimer?: ReturnType<typeof setInterval>;
@@ -207,7 +219,8 @@ export function escapeHtml(text: string): string {
  *
  * Режим `parseMode: 'markdown'` (Bot API 10.1 «Rich Messages»): стриминг —
  * эфемерным черновиком (`sendRichMessageDraft`, только приватные чаты; канал
- * необязательный — его сбой лишь отключает черновики), финал —
+ * необязательный — единичный сбой черновика стриминг не убивает, отключение
+ * лишь после серии сбоев), финал —
  * `sendRichMessage` полным Markdown (нативные таблицы/заголовки/списки). Если
  * **финальный** rich-вызов отклонён либо текст > {@link RICH_MESSAGE_LIMIT} —
  * откат на html-рендер (`markdownToTelegramHtml` + чанки ≤4096). Ошибки
@@ -746,10 +759,18 @@ export class AgentWatcher {
 
   /**
    * Стримит черновик rich-сообщения (`sendRichMessageDraft`). Черновики —
-   * необязательный эфемерный канал: любая проблема (недоступность, пустой
-   * контент, лимит, отказ Telegram) лишь прекращает их отправку
-   * ({@link LiveStream.richDraftsDisabled}); постоянный фоллбек выставляет
-   * только сбой финального `sendRichMessage`.
+   * необязательный эфемерный канал: недоступность (групповой чат) и серия
+   * сбоев лишь прекращают их отправку ({@link LiveStream.richDraftsDisabled});
+   * постоянный html-фоллбек выставляет только сбой финального
+   * `sendRichMessage`.
+   *
+   * Живучесть: `RICH_MESSAGE_EMPTY` — не сбой («сейчас показывать нечего»:
+   * незакрытый фенс, только `|`/`---`), черновик пропускается, счётчик не
+   * трогаем, `rendered` не помечаем (следующий чанк попробует снова).
+   * Транзиентные сбои (`aborted`, 5xx, сеть) копятся в
+   * {@link LiveStream.richDraftFailures} и отключают черновики только после
+   * {@link RICH_DRAFT_MAX_FAILURES} подряд. 429 уважает `retry_after` (окно
+   * тишины, как в html-пути).
    */
   private async flushRichDraft(
     route: SessionRoute,
@@ -773,31 +794,42 @@ export class AgentWatcher {
     if (markdown === live.rendered) return;
 
     const now = Date.now();
-    if (
-      !force &&
-      live.draftId !== undefined &&
-      now - (live.lastDraftAt ?? 0) < RICH_DRAFT_THROTTLE_MS
-    ) {
+    if (!force && now - (live.lastDraftAt ?? 0) < RICH_DRAFT_THROTTLE_MS) {
       return;
     }
     const draftId = live.draftId ?? draftIdOf(live.streamId ?? route.chatId);
-    if (!(await this.sendRichDraft(route, draftId, markdown))) {
-      // Черновик отклонён (валидация/несовместимость rich) — прекращаем слать
-      // дальнейшие, но стрим остаётся rich: финал пробуется как обычно.
-      live.richDraftsDisabled = true;
+    const result = await this.sendRichDraft(route, draftId, markdown);
+    if (result.ok) {
+      live.draftId = draftId;
+      live.lastDraftAt = now;
+      live.rendered = markdown;
+      live.richDraftFailures = 0;
       return;
     }
-    live.draftId = draftId;
-    live.lastDraftAt = now;
-    live.rendered = markdown;
+    // «Показывать нечего» — не сбой: пропускаем черновик, не отключаем канал и
+    // не помечаем `rendered` (следующий содержательный чанк попробует снова).
+    if (result.empty) return;
+    // 429 — не спамим черновиками до истечения окна (как в html-пути).
+    if (result.retryAfterMs !== undefined) {
+      live.lastDraftAt = now + result.retryAfterMs;
+    }
+    // Транзиентный/неизвестный сбой: отключаем черновики только после серии.
+    live.richDraftFailures = (live.richDraftFailures ?? 0) + 1;
+    if (live.richDraftFailures >= RICH_DRAFT_MAX_FAILURES) {
+      live.richDraftsDisabled = true;
+    }
   }
 
-  /** Отправляет черновик rich-сообщения; ошибки Telegram не бросаются. */
+  /**
+   * Отправляет черновик rich-сообщения; ошибки Telegram не бросаются.
+   * Различает исход: успех, «пустой» контент (`RICH_MESSAGE_EMPTY` — не сбой) и
+   * транзиентный сбой (с окном `retry_after` при 429).
+   */
   private async sendRichDraft(
     route: SessionRoute,
     draftId: number,
     markdown: string,
-  ): Promise<boolean> {
+  ): Promise<{ ok: boolean; empty?: boolean; retryAfterMs?: number }> {
     try {
       const response = await this.client.sendRichMessageDraft({
         chatId: Number(route.chatId),
@@ -806,15 +838,18 @@ export class AgentWatcher {
         ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
       });
       if (response.ok === false) {
+        // «Показывать нечего» — ожидаемое состояние (не ошибка, не логируем).
+        if (isEmptyRichError(response)) return { ok: false, empty: true };
         this.log(
           `[gateway] watcher: Telegram отклонил sendRichMessageDraft: ${describeBotError(response)}`,
         );
-        return false;
+        const retryAfter = retryAfterMs(response);
+        return { ok: false, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
       }
-      return true;
+      return { ok: true };
     } catch (error) {
       this.log(`[gateway] watcher: ошибка sendRichMessageDraft: ${errorMessage(error)}`);
-      return false;
+      return { ok: false };
     }
   }
 
@@ -1030,6 +1065,16 @@ function retryAfterMs(response: BotApiResponse<unknown>): number | undefined {
     return undefined;
   }
   return retryAfter * 1000;
+}
+
+/**
+ * «Показывать нечего»: Telegram отверг rich-черновик как пустой
+ * (`RICH_MESSAGE_EMPTY`) — не сбой, а отсутствие контента после разбора Markdown
+ * (незакрытый фенс, только `|`/`---`).
+ */
+function isEmptyRichError(response: BotApiResponse<unknown>): boolean {
+  const description = typeof response.description === 'string' ? response.description : '';
+  return description.toUpperCase().includes('RICH_MESSAGE_EMPTY');
 }
 
 /** Человекочитаемое описание ошибки Telegram-ответа (без секретов). */
