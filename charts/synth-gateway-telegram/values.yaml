@@ -1,10 +1,6 @@
 # --- Дефолтные значения для чарта synth-gateway-telegram ---
 # Telegram-шлюз Synth: поллинг Telegram → внешние события API v2 (AD-089).
-# Переопределяются при установке (--set, values-файл) или через Fleet.
-
-# Namespace развёртывания. Helm деплоит в namespace релиза; это значение
-# используется Fleet как targetNamespace и документация для helm template.
-namespace: synth
+# Переопределяются при установке (--set, values-файл).
 
 nameOverride: ""
 fullnameOverride: ""
@@ -63,7 +59,7 @@ env:
 # В `env:` его добавлять нельзя: значение из `env` перекрыло бы envFrom
 # (Secret), а пустое — отключило бы прокси. Файловый fallback
 # (`secrets/telegram_proxy_url`) в контейнере недоступен — каталог `secrets`
-# в K3s не монтируется.
+# в контейнер не монтируется.
 #
 # Полный справочник переменных и приоритетов — docs/configuration.md.
 existingSecret: ""
@@ -117,16 +113,14 @@ tenantsFile:
   mountPath: /etc/gateway/tenants.json
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Аутентификация Synth API по OIDC client-credentials (managed: backend под
-# OIDC/Keycloak, статический SYNTH_API_KEY не принимается). Несекретные поля
+# Аутентификация Synth API по OIDC client-credentials (OIDC-провайдер,
+# статический SYNTH_API_KEY не принимается). Несекретные поля
 # (tokenUrl/discoveryUrl/clientId/scope) можно задать здесь; client_secret —
 # ТОЛЬКО через existingSecret (ключ SYNTH_OIDC_CLIENT_SECRET).
 # Приоритет: SYNTH_SERVICE_KEY (scoped service-key, AD-052) > OIDC > SYNTH_API_KEY.
 #
-# managed-инстанс: OIDC issuer <oidc-issuer>,
-# клиент `synth-gateway` (confidential, service account, роли user/lead);
-# token URL <issuer>/protocol/openid-connect/token. client_secret лежит в
-# SealedSecret `synth-secrets` (см. репозиторий деплоя окружения) — сюда не прописывать.
+# Пример: tokenUrl = <issuer>/protocol/openid-connect/token;
+# client_secret — в Secret, подключаемом через existingSecret (сюда не прописывать).
 # Пусто (enabled=false) → standalone/dev: аутентификация по service-key/SYNTH_API_KEY.
 # ─────────────────────────────────────────────────────────────────────────────
 oidc:
@@ -142,6 +136,9 @@ oidc:
 # ─────────────────────────────────────────────────────────────────────────────
 persistence:
   enabled: true
+  # Имя существующего PVC (созданного вне чарта). Если задано — чарт PVC не
+  # создаёт, а Deployment использует этот claim. Пусто → чарт создаёт PVC сам.
+  existingClaim: ""
   size: 1Gi
   storageClass: ""
   mountPath: /var/lib/synth-gateway/data
@@ -178,3 +175,11 @@ ingress:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Произвольные дополнительные Kubernetes-манифесты. Список объектов
+# (YAML-фрагменты): каждый элемент рендерится отдельным документом. Объекты без
+# `metadata.namespace` попадают в namespace релиза. Пусто — ничего не
+# добавляется.
+# ─────────────────────────────────────────────────────────────────────────────
+extraObjects: []

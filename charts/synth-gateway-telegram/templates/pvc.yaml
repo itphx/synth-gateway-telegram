@@ -1,5 +1,6 @@
-{{- if .Values.persistence.enabled }}
-# PVC для JSON-хранилища add-on'а (создаётся, если persistence.enabled=true).
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+# PVC для JSON-хранилища add-on'а (создаётся, если persistence.enabled=true и не
+# задан persistence.existingClaim — тогда монтируется существующий claim).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

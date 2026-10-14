@@ -131,7 +131,7 @@ spec:
         {{- if .Values.persistence.enabled }}
         - name: data
           persistentVolumeClaim:
-            claimName: {{ include "synth-gateway-telegram.fullname" . }}
+            claimName: {{ .Values.persistence.existingClaim | default (include "synth-gateway-telegram.fullname" .) }}
         {{- end }}
         {{- if .Values.ca.enabled }}
         # Внутренний CA: существующий ConfigMap либо созданный из ca.caCert.
