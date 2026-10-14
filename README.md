@@ -57,6 +57,24 @@ cp .env.example .env && docker compose up --build
 Полный справочник конфигурации (переменные, CLI-флаги, секреты, режимы
 аутентификации, прокси, CA, мультитенантность) — **[docs/configuration.md](docs/configuration.md)**.
 
+## Аутентификация Synth API
+
+Приоритет (`src/gateway/auth.ts`): **service-key → OIDC → api-key → без auth**.
+
+- **Scoped service-key (рекомендуется).** `SYNTH_SERVICE_KEY` (`synth_svc_…`,
+  AD-052) — машинная аутентификация, ограниченная `scopes` и проекцией
+  `allowedProjects`. Минимум для сквозного контура (приём событий + обратная
+  доставка watch-all SSE): scopes `events:ingest`, `events:watch`; роль —
+  `LEAD` (для команд `/bind`). Backend даёт watch-all самому service-key по
+  scope `events:watch` — админ-права не нужны.
+- **OIDC (fallback).** `SYNTH_OIDC_*` (client-credentials) работает, но для
+  обратной доставки (watch-all SSE `GET /events`) требует, чтобы
+  service-account клиента шлюза в Keycloak имел **realm-роль** `lead`/`admin`:
+  backend читает realm-роли, а client-роли клиента — нет.
+- **Legacy.** `SYNTH_API_KEY` — standalone/dev, если service-key и OIDC не заданы.
+
+Детали и примеры — [docs/configuration.md](docs/configuration.md) §«Аутентификация Synth API».
+
 ## Структура
 
 ```text

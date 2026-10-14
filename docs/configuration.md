@@ -120,9 +120,13 @@ SYNTH_SERVICE_KEY  >  OIDC (discovery/token URL + client_id + client_secret)  > 
 
 - **Scoped service-key (рекомендуется).** Ключ `synth_svc_…` аутентифицирует
   машину и ограничен `scopes` + проекцией `allowedProjects`. Задан явно — он
-  главный. Требуемые scopes: `events:ingest`, `events:watch`, `bindings:read`,
-  `bindings:write`, `sessions:create`, `sessions:read`; роль ключа — `LEAD`
-  (мутации `/events/bindings*` под `requirePermission('ADMIN','LEAD')`).
+  главный. Минимум для сквозного контура (приём событий + обратная доставка
+  watch-all SSE `GET /events`) — scopes `events:ingest`, `events:watch`;
+  локальные команды `/bind`/`/unbind` и работа с сессиями добавляют
+  `bindings:read`, `bindings:write`, `sessions:create`, `sessions:read`. Роль
+  ключа — `LEAD` (для команд `/bind`/`/unbind`: мутации `/events/bindings*`
+  под `requirePermission('ADMIN','LEAD')`; watch-all SSE даёт сам
+  service-credential по scope `events:watch` — elevated-роль для этого не нужна).
 
   ```bash
   curl -sX POST http://127.0.0.1:5000/api/v2/service-keys \
@@ -145,6 +149,16 @@ SYNTH_SERVICE_KEY  >  OIDC (discovery/token URL + client_id + client_secret)  > 
   Ошибки — `gateway.oidc_token_failed` (секреты в логи не попадают).
   OIDC-запросы идут **напрямую** (`fetch`), `TELEGRAM_PROXY_URL` к ним не
   применяется.
+
+  **Для обратной доставки OIDC самодостаточен не полностью.** Watcher слушает
+  watch-all SSE `GET /events`, а backend для этого читает **realm-роли**
+  service-account'а, не client-роли клиента шлюза. Пока service-account'у
+  клиента в Keycloak не выдана **realm-роль** `lead`/`admin` (Clients → клиент
+  шлюза → Service accounts roles → назначить realm-роль), `GET /events` отдаёт
+  только сессии по обычным правилам видимости, и ответы агента в чаты не
+  доставляются. Поэтому для сквозного контура предпочтителен service-key: он
+  даёт watch-all по scope `events:watch` **без** админ-прав. OIDC остаётся
+  рабочей опцией (когда политика Keycloak уже выдаёт нужную realm-роль).
 - **Standalone/dev (legacy).** `SYNTH_API_KEY` — Bearer, если service-key и OIDC
   не заданы.
 - **Health.** `GET /health` → поля `auth`
@@ -192,12 +206,15 @@ env TELEGRAM_PROXY_URL  >  ALL_PROXY  >  HTTPS_PROXY  >  HTTP_PROXY  >  secrets/
 
 ```json
 { "tenants": [
-  { "id": "dev",  "botToken": "…", "synthUrl": "http://127.0.0.1:5000/api/v2",
-    "serviceKey": "synth_svc_…", "allowlist": "123456789:ADMIN" },
-  { "id": "prod", "botToken": "…", "synthUrl": "https://synth.example.com/api/v2",
-    "serviceKey": "synth_svc_…", "proxyUrl": "http://proxy.example.com:3129", "parseMode": "html" }
+  { "id": "dev",  "botToken": "111111:DEV_BOT_TOKEN", "synthUrl": "http://127.0.0.1:5000/api/v2",
+    "serviceKey": "synth_svc_DEV…", "allowlist": "123456789:ADMIN" },
+  { "id": "test", "botToken": "222222:TEST_BOT_TOKEN", "synthUrl": "https://synth.k3s.example/api/v2",
+    "serviceKey": "synth_svc_TEST…", "proxyUrl": "http://proxy.example.com:3129", "parseMode": "html" }
 ] }
 ```
+
+Каждый тенант использует свою среду и свои креды Synth API (`serviceKey`/`apiKey`/
+`oidc*`) — один `synth_svc_…` не переносится между средами.
 
 | Поле | Обязательно | Назначение |
 |---|---|---|
