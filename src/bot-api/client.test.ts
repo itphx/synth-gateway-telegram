@@ -155,6 +155,57 @@ describe('TelegramClient (dry-run)', () => {
     });
     expect(result.reply_markup).toEqual({ inline_keyboard: [] });
   });
+
+  it('dry-run sendRichMessage подставляет chat_id/rich_message и reply_parameters', async () => {
+    const fetchImpl = vi.fn();
+    const client = new TelegramClient({
+      dryRun: true,
+      channelId: '-1001234567890',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const sent = await client.sendRichMessage({
+      richMessage: { markdown: '| a | b |\n|---|---|\n| 1 | 2 |' },
+      replyToMessageId: 42,
+      messageThreadId: 7,
+    });
+    expect(sent.ok).toBe(true);
+    expect(sent.dryRun).toBe(true);
+    expect(sent.chat_id).toBe('-1001234567890');
+    expect(sent.rich_message).toEqual({ markdown: '| a | b |\n|---|---|\n| 1 | 2 |' });
+    // Rich-метод: reply только через reply_parameters, без reply_to_message_id.
+    expect(sent.reply_parameters).toEqual({ message_id: 42 });
+    expect(sent.message_thread_id).toBe(7);
+    expect(sent).not.toHaveProperty('reply_to_message_id');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('dry-run sendRichMessageDraft подставляет draft_id/rich_message/can_stop', async () => {
+    const client = new TelegramClient({ dryRun: true });
+    const result = await client.sendRichMessageDraft({
+      chatId: 123456789,
+      draftId: 7,
+      richMessage: { markdown: 'поток' },
+      messageThreadId: 3,
+      canStop: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.dryRun).toBe(true);
+    expect(result.chat_id).toBe(123456789);
+    expect(result.draft_id).toBe(7);
+    expect(result.rich_message).toEqual({ markdown: 'поток' });
+    expect(result.message_thread_id).toBe(3);
+    expect(result.can_stop).toBe(true);
+  });
+
+  it('dry-run editMessageText прокидывает rich_message вместо text', async () => {
+    const client = new TelegramClient({ dryRun: true, channelId: '42' });
+    const result = await client.editMessageText({
+      messageId: 7,
+      richMessage: { markdown: '**богатый**' },
+    });
+    expect(result.rich_message).toEqual({ markdown: '**богатый**' });
+    expect(result).not.toHaveProperty('text');
+  });
 });
 
 describe('TelegramClient getUpdates (с токеном)', () => {
@@ -270,6 +321,66 @@ describe('TelegramClient (с токеном)', () => {
       chat_id: '42',
       message_id: 7,
       reply_markup: { inline_keyboard: [] },
+    });
+  });
+
+  it('sendRichMessage делает POST в Bot API с rich_message/reply_parameters', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, result: { message_id: 11 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const client = new TelegramClient({
+      token: 'test-token',
+      channelId: '42',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const sent = await client.sendRichMessage({
+      richMessage: { markdown: '# Заголовок' },
+      replyToMessageId: 5,
+      messageThreadId: 7,
+    });
+    expect(sent.result?.message_id).toBe(11);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, { body: string }];
+    expect(url).toBe('https://api.telegram.org/bottest-token/sendRichMessage');
+    expect(JSON.parse(init.body)).toEqual({
+      chat_id: '42',
+      rich_message: { markdown: '# Заголовок' },
+      reply_parameters: { message_id: 5 },
+      message_thread_id: 7,
+    });
+  });
+
+  it('sendRichMessageDraft делает POST в Bot API с draft_id', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, result: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const client = new TelegramClient({
+      token: 'test-token',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const result = await client.sendRichMessageDraft({
+      chatId: 99,
+      draftId: 3,
+      richMessage: { markdown: 'частично' },
+      canStop: true,
+      keepOnStop: false,
+    });
+    expect(result.ok).toBe(true);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, { body: string }];
+    expect(url).toBe('https://api.telegram.org/bottest-token/sendRichMessageDraft');
+    expect(JSON.parse(init.body)).toEqual({
+      chat_id: 99,
+      draft_id: 3,
+      rich_message: { markdown: 'частично' },
+      can_stop: true,
+      keep_on_stop: false,
     });
   });
 });

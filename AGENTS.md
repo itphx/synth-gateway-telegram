@@ -80,6 +80,7 @@ Go-шаблон GitVerse CI).
 | Политика неизвестного отправителя | `src/gateway/unknown-action.ts` |
 | Явные команды бота | `src/gateway/commands.ts`, `command-handler.ts` |
 | Обратная доставка ответов (SSE) | `src/gateway/watcher.ts` |
+| Режимы отправки ответов (`parseMode`: plain/html/**markdown** rich) | `src/gateway/watcher.ts`, `src/bot-api/client.ts`, `docs/configuration.md` §«Режимы отправки ответов» |
 | Публикация событий (API v2) | `src/gateway/ingest.ts` |
 | Релиз / публикация (Docker/Helm) | `.gitverse/workflows/release.yaml`, `scripts/`, `docs/deployment.md` |
 | Таймауты / прокси / клиент Bot API | `src/bot-api/transport.ts`, `src/bot-api/client.ts` |

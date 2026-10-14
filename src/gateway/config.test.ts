@@ -164,11 +164,15 @@ describe('loadConfig', () => {
     expect(load({}).dryRun).toBe(true);
   });
 
-  it('parseMode: html распознаётся, прочее/пусто → plain, CLI приоритетнее', () => {
+  it('parseMode: html/markdown распознаются, прочее/пусто → plain, CLI приоритетнее', () => {
     expect(load({}).parseMode).toBe('plain');
     expect(load({ GATEWAY_PARSE_MODE: 'HTML' }).parseMode).toBe('html');
+    expect(load({ GATEWAY_PARSE_MODE: 'Markdown' }).parseMode).toBe('markdown');
     expect(load({ GATEWAY_PARSE_MODE: 'bogus' }).parseMode).toBe('plain');
     expect(load({ GATEWAY_PARSE_MODE: 'html' }, { parseMode: 'plain' }).parseMode).toBe('plain');
+    expect(load({ GATEWAY_PARSE_MODE: 'plain' }, { parseMode: 'markdown' }).parseMode).toBe(
+      'markdown',
+    );
   });
 
   it('watch: по умолчанию true; env/флаг выключают', () => {

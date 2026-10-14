@@ -1,4 +1,11 @@
-import type { InlineKeyboardMarkup, Message, ParseMode, Update, User } from '@grammyjs/types';
+import type {
+  InlineKeyboardMarkup,
+  InputRichMessage,
+  Message,
+  ParseMode,
+  Update,
+  User,
+} from '@grammyjs/types';
 
 import { DEFAULT_REQUEST_TIMEOUT_MS, createProxyAgent, requestJson } from './transport.js';
 import type { TelegramProxyAgent } from './transport.js';
@@ -78,6 +85,45 @@ export interface SendMessageParams {
 }
 
 /**
+ * Параметры sendRichMessage (Bot API 10.1 «Rich Messages», GramJS rich.d.ts).
+ * Rich-контент описывается объектом {@link InputRichMessage} — ровно одно из
+ * `html`/`markdown`/`blocks`. Reply — только через `reply_parameters`.
+ */
+export interface SendRichMessageParams {
+  chatId?: string | number;
+  /** Rich-контент (`{ markdown }`, `{ html }` или `{ blocks }`). */
+  richMessage: InputRichMessage<never>;
+  disableNotification?: boolean;
+  /** Inline-клавиатура (для кнопок ревью). */
+  replyMarkup?: InlineKeyboardMarkup;
+  /** id сообщения, на которое отвечаем (`reply_parameters.message_id`). */
+  replyToMessageId?: number;
+  /** id топика форума (`message_thread_id`). */
+  messageThreadId?: number;
+}
+
+/**
+ * Параметры sendRichMessageDraft — стриминг **черновика** rich-сообщения.
+ * Черновик эфемерен (~30 c, исчезает сам) и доступен **только в приватных
+ * чатах**; чтобы ответ сохранился, после генерации нужно вызвать
+ * `sendRichMessage`. `draftId` ≠ 0 и стабилен для одного потока — правки с тем
+ * же id анимируются.
+ */
+export interface SendRichMessageDraftParams {
+  /** Только приватный чат (числовой id). */
+  chatId: number;
+  /** Стабильный ненулевой id черновика потока. */
+  draftId: number;
+  richMessage: InputRichMessage<never>;
+  /** id топика форума (`message_thread_id`). */
+  messageThreadId?: number;
+  /** Показать кнопку остановки генерации. */
+  canStop?: boolean;
+  /** Оставить черновик в чате при остановке. */
+  keepOnStop?: boolean;
+}
+
+/**
  * Тип действия `sendChatAction` (по документации Bot API). В `@grammyjs/types`
  * отдельного алиаса нет — тип локальный (минимальный конверт, как
  * {@link BotApiResponse}).
@@ -121,7 +167,10 @@ export interface GetUpdatesParams {
 export interface EditMessageTextParams {
   chatId?: string | number;
   messageId: number;
-  text: string;
+  /** Новый текст (`text` не задаётся при правке через `richMessage`). */
+  text?: string;
+  /** Новый rich-контент (`rich_message`); альтернатива `text`. */
+  richMessage?: InputRichMessage<never>;
   parseMode?: ParseMode;
   disableWebPagePreview?: boolean;
   /**
@@ -233,6 +282,45 @@ export class TelegramClient {
   }
 
   /**
+   * Отправляет rich-сообщение (Bot API 10.1): нативные заголовки/списки/таблицы.
+   * Reply — через `reply_parameters` (не `reply_to_message_id`). Лимиты: до
+   * 32768 символов, 500 блоков, 20 колонок в таблице.
+   */
+  async sendRichMessage(params: SendRichMessageParams): Promise<BotApiResponse<Message>> {
+    const chatId = this.resolveChatId(params.chatId);
+    const payload: Record<string, unknown> = {
+      chat_id: chatId,
+      rich_message: params.richMessage,
+    };
+    if (params.disableNotification) payload.disable_notification = true;
+    if (params.replyMarkup) payload.reply_markup = params.replyMarkup;
+    if (params.replyToMessageId !== undefined) {
+      payload.reply_parameters = { message_id: params.replyToMessageId };
+    }
+    if (params.messageThreadId !== undefined) payload.message_thread_id = params.messageThreadId;
+    return this.call<Message>('sendRichMessage', payload);
+  }
+
+  /**
+   * Стримит черновик rich-сообщения (эфемерный ~30 c, только приватные чаты).
+   * Правки с тем же `draftId` анимируются. Чтобы ответ сохранился — по
+   * завершении вызвать {@link sendRichMessage}.
+   */
+  async sendRichMessageDraft(
+    params: SendRichMessageDraftParams,
+  ): Promise<BotApiResponse<boolean>> {
+    const payload: Record<string, unknown> = {
+      chat_id: params.chatId,
+      draft_id: params.draftId,
+      rich_message: params.richMessage,
+    };
+    if (params.messageThreadId !== undefined) payload.message_thread_id = params.messageThreadId;
+    if (params.canStop !== undefined) payload.can_stop = params.canStop;
+    if (params.keepOnStop !== undefined) payload.keep_on_stop = params.keepOnStop;
+    return this.call<boolean>('sendRichMessageDraft', payload);
+  }
+
+  /**
    * Сообщает клиенту статус («Печатает…» и т. п.). Статус держится ~5 секунд
    * либо сбрасывается приходящим сообщением — вызывать повторно, пока действие
    * продолжается.
@@ -244,14 +332,15 @@ export class TelegramClient {
     return this.call<boolean>('sendChatAction', payload);
   }
 
-  /** Редактирует текст ранее отправленного сообщения. */
+  /** Редактирует текст ранее отправленного сообщения (или его rich-контент). */
   async editMessageText(params: EditMessageTextParams): Promise<BotApiResponse<Message>> {
     const chatId = this.resolveChatId(params.chatId);
     const payload: Record<string, unknown> = {
       chat_id: chatId,
       message_id: params.messageId,
-      text: params.text,
     };
+    if (params.richMessage) payload.rich_message = params.richMessage;
+    if (params.text !== undefined) payload.text = params.text;
     if (params.parseMode) payload.parse_mode = params.parseMode;
     if (params.disableWebPagePreview) payload.link_preview_options = { is_disabled: true };
     if (params.replyMarkup) payload.reply_markup = params.replyMarkup;

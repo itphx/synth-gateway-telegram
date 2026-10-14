@@ -24,11 +24,45 @@ export const TYPING_MAX_IDLE_MS = 60_000;
 /** Минимальный интервал между правками live-сообщения, мс. */
 export const EDIT_THROTTLE_MS = 1500;
 
+/**
+ * Троттлинг черновиков rich-сообщений (`parseMode: 'markdown'`), мс: Bot API
+ * анимирует правки одного `draft_id`, но спамить ими не нужно.
+ */
+export const RICH_DRAFT_THROTTLE_MS = 1000;
+
+/**
+ * Лимит rich-сообщения (Bot API 10.1): 32768 символов. Больше — rich-вызов
+ * отклоняется, watcher откатывается на html-рендер с чанками ≤4096.
+ */
+export const RICH_MESSAGE_LIMIT = 32768;
+
 /** Метка, добавляемая к частичному ответу при остановке (`/stop`). */
 export const STOPPED_MARK = '⏹ Остановлено';
 
 /** Максимум запоминаемых завершённых `stream_id` (защита от допоздних чанков). */
 const FINALIZED_STREAMS_LIMIT = 500;
+
+/**
+ * Приватный чат? Bot API `sendRichMessageDraft` доступен только в приватных
+ * чатах: их id положительны, у групп/супергрупп/каналов — отрицательны.
+ */
+export function isPrivateChatId(chatId: string): boolean {
+  return /^\d+$/.test(chatId.trim());
+}
+
+/**
+ * Стабильный ненулевой `draft_id` из `stream_id` (или сессии): правки с тем же
+ * id анимируются, а разные потоки не «сливаются» в один черновик.
+ */
+function draftIdOf(seed: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  // Диапазон 1..2^31-1: draft_id должен быть ненулевым.
+  return (Math.abs(hash) % 2_147_483_646) + 1;
+}
 
 /**
  * Состояние активного стрима сессии (live-сообщение Telegram + индикатор
@@ -50,6 +84,12 @@ interface LiveStream {
   lastActivityAt: number;
   /** Последний отправленный текст; правка не шлётся, если текст не изменился. */
   rendered?: string;
+  /** Rich-режим: стабильный id черновика (`sendRichMessageDraft`) этого стрима. */
+  draftId?: number;
+  /** Rich-режим: время последнего черновика (троттлинг). */
+  lastDraftAt?: number;
+  /** Rich-вызов отклонён — стрим переведён на html-фоллбек. */
+  richFallback?: boolean;
   typingTimer?: ReturnType<typeof setInterval>;
   finalized: boolean;
 }
@@ -158,6 +198,13 @@ export function escapeHtml(text: string): string {
  * `message.added`), отмена — `stream.cancelled`, сбой — `stream.error`.
  * Переподключается с backoff; дедуп исходящих — персистентный
  * (`GatewayStore.sent`).
+ *
+ * Режим `parseMode: 'markdown'` (Bot API 10.1 «Rich Messages»): стриминг —
+ * эфемерным черновиком (`sendRichMessageDraft`, только приватные чаты), финал —
+ * `sendRichMessage` полным Markdown (нативные таблицы/заголовки/списки). Если
+ * rich-вызов отклонён либо текст > {@link RICH_MESSAGE_LIMIT} — откат на
+ * html-рендер (`markdownToTelegramHtml` + чанки ≤4096). Ошибки Telegram не
+ * роняют watcher.
  */
 export class AgentWatcher {
   private readonly baseUrl: string;
@@ -389,7 +436,8 @@ export class AgentWatcher {
     if (attempt === undefined) return;
     const max = num(data.max_retries);
     live.note = `↻ повтор ${attempt}${max !== undefined ? `/${max}` : ''}…`;
-    if (live.messageId === undefined || live.text.length === 0) return;
+    if (live.text.length === 0) return;
+    if (live.messageId === undefined && live.draftId === undefined) return;
     await this.flushLive(route, live, true);
   }
 
@@ -652,8 +700,18 @@ export class AgentWatcher {
    * Отправляет live-сообщение при первом контенте либо правит его с
    * троттлингом. Правка не шлётся, если текст не изменился (иначе Telegram
    * отвечает 400 `message is not modified`).
+   *
+   * В rich-режиме live — это черновик (`sendRichMessageDraft`): в приватном
+   * чате он стримится, в группе черновики недоступны и остаётся только
+   * «Печатает…». Если rich-вызов отклонён (лимит/неподдерживаемый контент) —
+   * стрим откатывается на обычный html-путь.
    */
   private async flushLive(route: SessionRoute, live: LiveStream, force: boolean): Promise<void> {
+    if (this.parseMode === 'markdown' && !live.richFallback) {
+      if (await this.flushRichDraft(route, live, force)) return;
+      // rich недоступен для этого стрима — дальше обычный (html) путь.
+      live.richFallback = true;
+    }
     const body = this.renderLive(live);
     if (body === live.rendered) return;
     const now = Date.now();
@@ -680,8 +738,108 @@ export class AgentWatcher {
   }
 
   /**
-   * Финал стрима: live-сообщение редактируется первым чанком, остальные
-   * досылаются новыми сообщениями; без live — обычная доставка с чанкингом.
+   * Стримит черновик rich-сообщения (`sendRichMessageDraft`). Возвращает
+   * `true`, если rich-путь обработан (в т. ч. когда черновики недоступны — не
+   * приватный чат); `false` — rich-вызов отклонён, нужен html-фоллбек.
+   */
+  private async flushRichDraft(
+    route: SessionRoute,
+    live: LiveStream,
+    force: boolean,
+  ): Promise<boolean> {
+    // Черновики Bot API доступны только в приватных чатах; в группе — только
+    // индикатор «Печатает…» и финальная отправка.
+    if (!isPrivateChatId(route.chatId)) return true;
+    const markdown = live.note ? `${live.text}\n\n${live.note}` : live.text;
+    // Текст не влезает в rich-лимит — не рискуем, сразу html-фоллбек.
+    if (markdown.length > RICH_MESSAGE_LIMIT) return false;
+    if (markdown === live.rendered) return true;
+
+    const now = Date.now();
+    if (
+      !force &&
+      live.draftId !== undefined &&
+      now - (live.lastDraftAt ?? 0) < RICH_DRAFT_THROTTLE_MS
+    ) {
+      return true;
+    }
+    const draftId = live.draftId ?? draftIdOf(live.streamId ?? route.chatId);
+    if (!(await this.sendRichDraft(route, draftId, markdown))) return false;
+    live.draftId = draftId;
+    live.lastDraftAt = now;
+    live.rendered = markdown;
+    return true;
+  }
+
+  /** Отправляет черновик rich-сообщения; ошибки Telegram не бросаются. */
+  private async sendRichDraft(
+    route: SessionRoute,
+    draftId: number,
+    markdown: string,
+  ): Promise<boolean> {
+    try {
+      const response = await this.client.sendRichMessageDraft({
+        chatId: Number(route.chatId),
+        draftId,
+        richMessage: { markdown },
+        ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
+        canStop: true,
+      });
+      if (response.ok === false) {
+        this.log(
+          `[gateway] watcher: Telegram отклонил sendRichMessageDraft: ${describeBotError(response)}`,
+        );
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.log(`[gateway] watcher: ошибка sendRichMessageDraft: ${errorMessage(error)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Финальная (персистентная) отправка rich-сообщения (`sendRichMessage`):
+   * черновик эфемерен и исчезает — сохранить ответ можно только так. Возвращает
+   * исход: `ok: false` — нужен html-фоллбек (rich отклонён либо текст > лимита).
+   */
+  private async sendRichFinal(
+    route: SessionRoute,
+    markdown: string,
+  ): Promise<{ ok: boolean; messageId?: number }> {
+    if (!markdown || markdown.length > RICH_MESSAGE_LIMIT) return { ok: false };
+    try {
+      const response = await this.client.sendRichMessage({
+        chatId: route.chatId,
+        richMessage: { markdown },
+        ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
+        ...(route.lastInboundMessageId !== undefined
+          ? { replyToMessageId: route.lastInboundMessageId }
+          : {}),
+      });
+      if (response.ok === false) {
+        this.log(
+          `[gateway] watcher: Telegram отклонил sendRichMessage: ${describeBotError(response)}`,
+        );
+        return { ok: false };
+      }
+      return {
+        ok: true,
+        ...(response.result?.message_id !== undefined
+          ? { messageId: response.result.message_id }
+          : {}),
+      };
+    } catch (error) {
+      this.log(`[gateway] watcher: ошибка sendRichMessage: ${errorMessage(error)}`);
+      return { ok: false };
+    }
+  }
+
+  /**
+   * Финал стрима: в rich-режиме — `sendRichMessage` полным Markdown (черновик
+   * эфемерен); при отклонении — html-фоллбек. Иначе live-сообщение
+   * редактируется первым чанком, остальные досылаются новыми сообщениями; без
+   * live — обычная доставка с чанкингом.
    */
   private async finalize(
     route: SessionRoute,
@@ -691,9 +849,19 @@ export class AgentWatcher {
   ): Promise<void> {
     const body = marker ? (text ? `${text}\n\n${marker}` : marker) : text;
     if (!body) return;
+    // Rich-финал: черновик эфемерен — персистентно сохраняем через sendRichMessage.
+    if (this.parseMode === 'markdown' && !live?.richFallback) {
+      const sent = await this.sendRichFinal(route, body);
+      if (sent.ok) {
+        await this.rememberOutbound(route, sent.messageId);
+        return;
+      }
+      // Rich отклонён (лимиты/неподдерживаемый контент) — html-фоллбек.
+      if (live) live.richFallback = true;
+    }
     const chunks = this.renderChunks(body);
     if (live?.messageId === undefined) {
-      await this.deliver(route, body);
+      await this.sendChunks(route, chunks);
       return;
     }
 
@@ -708,10 +876,27 @@ export class AgentWatcher {
     await this.rememberOutbound(route, lastMessageId);
   }
 
-  /** Отправляет текст в чат маршрута (с чанкингом) и обновляет состояние. */
-  private async deliver(route: SessionRoute, text: string): Promise<void> {
+  /**
+   * Отправляет текст в чат маршрута (с чанкингом) и обновляет состояние. В
+   * rich-режиме сначала пробует `sendRichMessage`; при отклонении (или тексте
+   * > лимита) откатывается на html-рендер с чанками.
+   */
+  private async deliver(route: SessionRoute, text: string, live?: LiveStream): Promise<void> {
+    if (this.parseMode === 'markdown' && !live?.richFallback) {
+      const sent = await this.sendRichFinal(route, text);
+      if (sent.ok) {
+        await this.rememberOutbound(route, sent.messageId);
+        return;
+      }
+      if (live) live.richFallback = true;
+    }
+    await this.sendChunks(route, this.renderChunks(text));
+  }
+
+  /** Отправляет готовые чанки по порядку (последний id — в состояние привязки). */
+  private async sendChunks(route: SessionRoute, chunks: string[]): Promise<void> {
     let lastMessageId: number | undefined;
-    for (const chunk of this.renderChunks(text)) {
+    for (const chunk of chunks) {
       const id = await this.sendText(route, chunk);
       if (id !== undefined) lastMessageId = id;
     }
@@ -724,7 +909,7 @@ export class AgentWatcher {
       const response = await this.client.sendMessage({
         chatId: route.chatId,
         text: body,
-        ...(this.parseMode === 'html' ? { parseMode: 'HTML' as const } : {}),
+        ...(this.parseMode !== 'plain' ? { parseMode: 'HTML' as const } : {}),
         ...(route.threadId !== undefined ? { messageThreadId: route.threadId } : {}),
         ...(route.lastInboundMessageId !== undefined
           ? { replyToMessageId: route.lastInboundMessageId }
@@ -752,7 +937,7 @@ export class AgentWatcher {
         chatId: route.chatId,
         messageId,
         text: body,
-        ...(this.parseMode === 'html' ? { parseMode: 'HTML' as const } : {}),
+        ...(this.parseMode !== 'plain' ? { parseMode: 'HTML' as const } : {}),
       });
       if (response.ok === false) {
         this.log(
@@ -781,23 +966,23 @@ export class AgentWatcher {
   }
 
   /**
-   * Готовые к отправке чанки. Для `parse_mode: 'html'` Markdown ответа
+   * Готовые к отправке чанки. Для `html`-режима и rich-фоллбека Markdown ответа
    * рендерится в Telegram-HTML, затем HTML безопасно режется на сообщения
    * (теги/сущности не рвутся, баланс тегов сохраняется); для `plain` поведение
    * прежнее.
    */
   private renderChunks(text: string): string[] {
-    if (this.parseMode !== 'html') return chunkText(text);
+    if (this.parseMode === 'plain') return chunkText(text);
     return chunkHtmlText(markdownToTelegramHtml(text));
   }
 
   /**
-   * Готовит текст к отправке. Для `plain` — как раньше; для `html` — рендерит
-   * Markdown в HTML и обрезает превью до лимита по отрендеренной разметке,
-   * закрывая открытые теги.
+   * Готовит текст к отправке. Для `plain` — как раньше; для `html` и
+   * rich-фоллбека — рендерит Markdown в HTML и обрезает превью до лимита по
+   * отрендеренной разметке, закрывая открытые теги.
    */
   private renderText(text: string): string {
-    if (this.parseMode !== 'html') {
+    if (this.parseMode === 'plain') {
       if (text.length <= TELEGRAM_MESSAGE_LIMIT) return text;
       return `${text.slice(0, TELEGRAM_MESSAGE_LIMIT - 1)}…`;
     }

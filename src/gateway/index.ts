@@ -193,7 +193,7 @@ function printHelp(): void {
       '  --allowlist LIST      список доступа chatId:ROLE через запятую (env GATEWAY_ALLOWLIST)',
       '  --tenants-file PATH   файл тенантов (боты → среды Synth): env GATEWAY_TENANTS_FILE,',
       '                        secrets/tenants.json. Нет файла — один тенант default из env/CLI',
-      '  --parse-mode MODE     отправка ответов: plain (дефолт) | html (env GATEWAY_PARSE_MODE)',
+      '  --parse-mode MODE     отправка ответов: plain (дефолт) | html | markdown (rich; env GATEWAY_PARSE_MODE)',
       '  --unknown-action ACT  политика неизвестного отправителя: register (дефолт) | hint | reject (env GATEWAY_UNKNOWN_ACTION)',
       '  --poll-timeout SEC    таймаут long-polling getUpdates, сек (env GATEWAY_POLL_TIMEOUT_SEC)',
       '  --request-timeout SEC таймаут обычных запросов Bot API, сек (env GATEWAY_REQUEST_TIMEOUT_SEC)',

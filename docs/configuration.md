@@ -37,11 +37,37 @@ CLI-флаг  >  env  >  файл secrets/  >  значение по умолч�
 | `GATEWAY_SECRETS_DIR` | `<repo>/secrets` | Каталог секрет-файлов |
 | `GATEWAY_DRY_RUN` | вычисляется по наличию токена | Форсировать dry-run |
 | `GATEWAY_WATCH` | `true` | Поднимать ли watcher ответов агента (SSE) |
-| `GATEWAY_PARSE_MODE` | `plain` | Отправка ответов: `plain` \| `html` (Markdown → Telegram-HTML + `parse_mode: 'HTML'`) |
+| `GATEWAY_PARSE_MODE` | `plain` | Отправка ответов: `plain` \| `html` \| `markdown` (см. «Режимы отправки ответов») |
 | `GATEWAY_UNKNOWN_ACTION` | `register` | Политика неизвестного отправителя: `register` \| `hint` \| `reject` |
 | `GATEWAY_POLL_TIMEOUT_SEC` | `30` | Таймаут long-polling `getUpdates`, сек (запросный таймаут — long-poll + 15 с) |
 | `GATEWAY_REQUEST_TIMEOUT_SEC` | `30` | Таймаут обычных запросов Bot API, сек |
 | `GATEWAY_HOST` / `GATEWAY_PORT` | `127.0.0.1` / `7100` | Health-сервер |
+
+### Режимы отправки ответов (`parseMode`)
+
+`GATEWAY_PARSE_MODE` / `--parse-mode` / per-tenant `parseMode`; неизвестное значение → дефолт `plain`.
+
+| Режим | Поведение |
+|---|---|
+| `plain` | Ответ агента отправляется как есть (`sendMessage`, без `parse_mode`) |
+| `html` | Markdown ответа рендерится в Telegram-HTML (`markdownToTelegramHtml`) и отправляется с `parse_mode: 'HTML'`, чанки ≤ 4096 |
+| `markdown` | Bot API 10.1 «Rich Messages» (`sendRichMessage`): нативные заголовки, списки, **таблицы**, цитаты, фоллбэки и т. п. Markdown уходит как есть |
+
+Режим `markdown` (rich):
+
+- **Стриминг** — эфемерным черновиком (`sendRichMessageDraft`): в **приватных
+  чатах** ответ стримится накопленным Markdown с троттлингом ~1 c (правки одного
+  `draft_id` анимируются). **В группах/каналах черновики Bot API недоступны** —
+  остаётся только индикатор «Печатает…», полный ответ приходит в финале.
+- **Финал** (`stream.done`) — персистентный `sendRichMessage` полным Markdown
+  (черновик сам исчезает ~через 30 c). `stream.cancelled` — rich-сообщение с
+  частичным текстом и пометкой «⏹ Остановлено»; `stream.error` — rich-сообщение
+  об ошибке.
+- **Фоллбек.** Если rich-вызов отклонён (400: лимиты/неподдерживаемый контент)
+  или текст > 32768 символов — watcher откатывается на html-путь
+  (`markdownToTelegramHtml` + чанки ≤ 4096). Ошибки Telegram не роняют watcher.
+- **Лимиты rich:** до 32768 символов, 500 блоков, 20 колонок в таблице. Reply —
+  через `reply_parameters`.
 
 ### MCP-сервер (`synth-gateway-tg`)
 
@@ -63,7 +89,7 @@ synth-gateway-telegram [--once] [--dry-run] [--no-watch] [--token TOKEN]
                        [--oidc-discovery-url URL] [--oidc-client-id ID]
                        [--oidc-client-secret SECRET] [--oidc-scope SCOPE]
                        [--allowlist LIST] [--tenants-file PATH]
-                       [--parse-mode plain|html]
+                       [--parse-mode plain|html|markdown]
                        [--unknown-action register|hint|reject]
                        [--poll-timeout SEC] [--request-timeout SEC]
                        [--data-dir DIR] [--host HOST] [--port N] [--help]
@@ -225,7 +251,7 @@ env TELEGRAM_PROXY_URL  >  ALL_PROXY  >  HTTPS_PROXY  >  HTTP_PROXY  >  secrets/
 | `oidcTokenUrl`/`oidcDiscoveryUrl`/`oidcClientId`/`oidcClientSecret`/`oidcScope` | нет | OIDC client-credentials |
 | `proxyUrl` | нет | Egress-прокси Bot API тенанта |
 | `allowlist` | нет | Строка `"chatId:ROLE,…"` **или** объект `{"chatId":"ROLE"}` |
-| `parseMode` | нет | `plain` (дефолт) \| `html` (рендер Markdown ответа в Telegram-HTML) |
+| `parseMode` | нет | `plain` (дефолт) \| `html` (Markdown → Telegram-HTML) \| `markdown` (Bot API 10.1 rich: таблицы/заголовки/списки + стриминг черновика) |
 | `unknownAction` | нет | `register` \| `hint` \| `reject` |
 | `watch` | нет | Поднимать ли watcher ответов (SSE) |
 | `pollTimeoutSec` / `requestTimeoutSec` | нет | Таймауты Bot API, сек |

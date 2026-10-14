@@ -30,6 +30,11 @@ Telegram Bot API                 synth-gateway-telegram                    Synth
                                   └── offset / seen / chatSessions / routes / sent ── FileStore
 ```
 
+Режим отправки ответов — `parseMode` (`plain` \| `html` \| `markdown`). `markdown`
+использует Bot API 10.1 «Rich Messages»: нативные таблицы/заголовки/списки и
+стриминг ответа черновиком в приватных чатах; детали и фоллбеки —
+[docs/configuration.md](docs/configuration.md) §«Режимы отправки ответов».
+
 ## Быстрый старт
 
 ```bash

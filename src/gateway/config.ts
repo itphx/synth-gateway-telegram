@@ -5,8 +5,12 @@ import { fileURLToPath } from 'node:url';
 import type { OidcAuthConfig } from './auth.js';
 import { parseUnknownAction, type UnknownAction } from './unknown-action.js';
 
-/** Режим отправки ответов в Telegram: `plain` (по умолчанию) или `html`. */
-export type ParseMode = 'plain' | 'html';
+/**
+ * Режим отправки ответов в Telegram: `plain` (по умолчанию), `html` (рендер
+ * Markdown в Telegram-HTML) или `markdown` (Bot API 10.1 «Rich Messages»:
+ * нативные таблицы/заголовки/списки + стриминг черновика).
+ */
+export type ParseMode = 'plain' | 'html' | 'markdown';
 
 /**
  * Конфигурация одного тенанта (бот → среда Synth).
@@ -715,7 +719,13 @@ export function loadConfig(
   };
 }
 
-/** Нормализует режим отправки: `html` → `html`, иначе дефолт `plain`. */
+/**
+ * Нормализует режим отправки: `html` → `html`, `markdown` → `markdown`,
+ * прочее/пусто → дефолт `plain`.
+ */
 export function parseParseMode(value: string | undefined): ParseMode {
-  return value?.trim().toLowerCase() === 'html' ? 'html' : DEFAULT_PARSE_MODE;
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'html') return 'html';
+  if (normalized === 'markdown') return 'markdown';
+  return DEFAULT_PARSE_MODE;
 }

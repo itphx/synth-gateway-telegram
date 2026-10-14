@@ -7,7 +7,7 @@ import type { TelegramClient } from '../bot-api/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GatewayStore } from './store.js';
-import { ADDED_FALLBACK_GRACE_MS, AgentWatcher, chunkHtmlText, chunkText, escapeHtml, markdownToTelegramHtml, parseSseData, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
+import { ADDED_FALLBACK_GRACE_MS, AgentWatcher, chunkHtmlText, chunkText, escapeHtml, isPrivateChatId, markdownToTelegramHtml, parseSseData, RICH_DRAFT_THROTTLE_MS, RICH_MESSAGE_LIMIT, TELEGRAM_MESSAGE_LIMIT, truncateHtmlText, TYPING_INTERVAL_MS, TYPING_MAX_IDLE_MS } from './watcher.js';
 
 const CHAT_KEY = 'chat:telegram:123456789';
 const SESSION_ID = 'sess_1';
@@ -997,5 +997,289 @@ describe('AgentWatcher: Bearer-провайдер (OIDC)', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     const [, retryInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
     expect((retryInit.headers as Record<string, string>).authorization).toBe('Bearer fresh');
+  });
+});
+
+describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
+  let dir: string;
+  let store: GatewayStore;
+  let client: TelegramClient;
+  let sendMessage: ReturnType<typeof vi.fn>;
+  let editMessageText: ReturnType<typeof vi.fn>;
+  let sendChatAction: ReturnType<typeof vi.fn>;
+  let sendRichMessage: ReturnType<typeof vi.fn>;
+  let sendRichMessageDraft: ReturnType<typeof vi.fn>;
+  let watcher: AgentWatcher;
+
+  function makeRichClient(): void {
+    let nextId = 100;
+    sendMessage = vi.fn(async (params: Record<string, unknown>) => ({
+      ok: true,
+      dryRun: true,
+      result: { message_id: (nextId += 1) },
+      ...params,
+    }));
+    editMessageText = vi.fn(async (params: Record<string, unknown>) => ({
+      ok: true,
+      dryRun: true,
+      result: { message_id: (params.message_id as number | undefined) ?? 0 },
+      ...params,
+    }));
+    sendChatAction = vi.fn(async (params: Record<string, unknown>) => ({
+      ok: true,
+      dryRun: true,
+      result: true,
+      ...params,
+    }));
+    sendRichMessage = vi.fn(async (params: Record<string, unknown>) => ({
+      ok: true,
+      dryRun: true,
+      result: { message_id: (nextId += 1) },
+      ...params,
+    }));
+    sendRichMessageDraft = vi.fn(async (params: Record<string, unknown>) => ({
+      ok: true,
+      dryRun: true,
+      result: true,
+      ...params,
+    }));
+    client = {
+      dryRun: true,
+      sendMessage,
+      editMessageText,
+      sendChatAction,
+      sendRichMessage,
+      sendRichMessageDraft,
+    } as unknown as TelegramClient;
+  }
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    dir = await mkdtemp(join(tmpdir(), 'gateway-rich-'));
+    store = new GatewayStore(dir);
+    await store.init();
+    makeRichClient();
+    // Приватный чат: положительный числовой id (черновики доступны).
+    await store.setChatSession(CHAT_KEY, {
+      sessionId: SESSION_ID,
+      chatId: '123456789',
+      threadId: 7,
+      lastInboundMessageId: 42,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    watcher = new AgentWatcher({
+      baseUrl: 'http://127.0.0.1:5000/api/v2',
+      client,
+      store,
+      parseMode: 'markdown',
+    });
+  });
+
+  afterEach(async () => {
+    watcher.stop();
+    vi.useRealTimers();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const chunk = (data: Record<string, unknown>): Promise<void> =>
+    watcher.handleEvent({ type: 'stream.chunk', sessionId: SESSION_ID, data });
+
+  const done = (data: Record<string, unknown>): Promise<void> =>
+    watcher.handleEvent({ type: 'stream.done', sessionId: SESSION_ID, data });
+
+  async function setChatId(chatId: string): Promise<void> {
+    await store.setChatSession(CHAT_KEY, {
+      sessionId: SESSION_ID,
+      chatId,
+      threadId: 7,
+      lastInboundMessageId: 42,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+  }
+
+  it('isPrivateChatId: положительный id — приватный, группы/каналы — нет', () => {
+    expect(isPrivateChatId('123456789')).toBe(true);
+    expect(isPrivateChatId('-1001234567890')).toBe(false);
+    expect(isPrivateChatId('-42')).toBe(false);
+    expect(isPrivateChatId('@channel')).toBe(false);
+  });
+
+  it('приватный чат: черновики стримятся, финал — sendRichMessage', async () => {
+    await chunk({ stream_id: 's1', content: '# Заголовок\n' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
+    expect(sendRichMessageDraft.mock.calls[0]?.[0]).toMatchObject({
+      chatId: 123456789,
+      richMessage: { markdown: '# Заголовок\n' },
+      messageThreadId: 7,
+      canStop: true,
+    });
+    // Живой текст в rich-режиме обычным сообщением не шлётся.
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    // Второй чанк внутри окна троттлинга — черновик не правится.
+    await chunk({ stream_id: 's1', content: 'текст' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
+
+    // После окна — правка накопленным Markdown.
+    await vi.advanceTimersByTimeAsync(RICH_DRAFT_THROTTLE_MS);
+    await chunk({ stream_id: 's1', content: '!' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(2);
+    expect(sendRichMessageDraft.mock.calls[1]?.[0]).toMatchObject({
+      richMessage: { markdown: '# Заголовок\nтекст!' },
+    });
+
+    // Финал — персистентный sendRichMessage с полным Markdown.
+    await done({ stream_id: 's1', content: '# Заголовок\nтекст!', message_index: 3 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      chatId: '123456789',
+      richMessage: { markdown: '# Заголовок\nтекст!' },
+      replyToMessageId: 42,
+      messageThreadId: 7,
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    // Повторный done (reconnect) — дедуп: второго rich-финала нет.
+    await done({ stream_id: 's1', content: '# Заголовок\nтекст!', message_index: 3 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('в группе черновиков нет: только «Печатает…» и финальный sendRichMessage', async () => {
+    await setChatId('-1001234567890');
+    await chunk({ stream_id: 's1', content: 'ответ' });
+    expect(sendRichMessageDraft).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+    // Индикатор «Печатает…» включён.
+    expect(sendChatAction).toHaveBeenCalledTimes(1);
+
+    await done({ stream_id: 's1', content: 'ответ', message_index: 4 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      chatId: '-1001234567890',
+      richMessage: { markdown: 'ответ' },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('Markdown с таблицей уходит в rich как есть (не рендерится в html)', async () => {
+    const table = '| Метрика | Значение |\n|:--------|---------:|\n| Скорость | **42** |';
+    await done({ stream_id: 's1', content: table, message_index: 5 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: table },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('stream.done: rich отклонён (400) → html-фоллбек с чанками', async () => {
+    sendRichMessage.mockResolvedValueOnce({
+      ok: false,
+      error_code: 400,
+      description: 'unsupported rich content',
+    });
+    await done({ stream_id: 's1', content: '**жирный** и `код`', message_index: 6 });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      text: '<b>жирный</b> и <code>код</code>',
+      parseMode: 'HTML',
+    });
+  });
+
+  it('текст > 32768 символов не идёт в rich — html-фоллбек с чанками', async () => {
+    const content = 'a'.repeat(RICH_MESSAGE_LIMIT + 1);
+    await done({ stream_id: 's1', content, message_index: 7 });
+    // rich-вызов даже не делается — сразу html-путь.
+    expect(sendRichMessage).not.toHaveBeenCalled();
+    expect(sendMessage.mock.calls.length).toBeGreaterThan(1);
+    for (const call of sendMessage.mock.calls) {
+      expect((call[0] as { text: string }).text.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    }
+  });
+
+  it('stream.cancelled: rich с частичным текстом и пометкой об остановке', async () => {
+    await chunk({ stream_id: 's1', content: 'частичный' });
+    await watcher.handleEvent({
+      type: 'stream.cancelled',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'частичный ответ' },
+    });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: 'частичный ответ\n\n⏹ Остановлено' },
+    });
+    // Индикатор остановлен.
+    const typingCalls = sendChatAction.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(TYPING_INTERVAL_MS * 3);
+    expect(sendChatAction).toHaveBeenCalledTimes(typingCalls);
+  });
+
+  it('stream.error: rich-уведомление об ошибке', async () => {
+    await watcher.handleEvent({
+      type: 'stream.error',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', error: 'провайдер недоступен' },
+    });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: expect.stringContaining('провайдер недоступен') },
+    });
+  });
+
+  it('черновик отклонён Telegram → стрим переходит на html-фоллбек', async () => {
+    sendRichMessageDraft.mockResolvedValueOnce({
+      ok: false,
+      error_code: 400,
+      description: 'bad rich draft',
+    });
+    await chunk({ stream_id: 's1', content: '**жирный**' });
+    // Первый черновик отклонён → сразу html live-сообщение.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      text: '<b>жирный</b>',
+      parseMode: 'HTML',
+    });
+
+    // Дальнейшие чанки идут html-правками, черновики больше не шлются.
+    sendRichMessageDraft.mockClear();
+    await vi.advanceTimersByTimeAsync(1500);
+    await chunk({ stream_id: 's1', content: ' и ещё' });
+    expect(sendRichMessageDraft).not.toHaveBeenCalled();
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+
+    // Финал — html-правка live-сообщения, rich не задействован.
+    sendRichMessage.mockClear();
+    await done({ stream_id: 's1', content: '**жирный** и ещё', message_index: 8 });
+    expect(sendRichMessage).not.toHaveBeenCalled();
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      text: '<b>жирный</b> и ещё',
+      parseMode: 'HTML',
+    });
+  });
+
+  it('message.added (фоллбек без стрима) доставляется rich-сообщением', async () => {
+    await watcher.handleEvent({
+      type: 'message.added',
+      sessionId: SESSION_ID,
+      data: { role: 'assistant', content: '## Заголовок', message_index: 9 },
+    });
+    const pending = (watcher as unknown as {
+      pendingAdded: Map<string, { settled: Promise<void> }>;
+    }).pendingAdded.get(SESSION_ID)?.settled;
+    await vi.advanceTimersByTimeAsync(ADDED_FALLBACK_GRACE_MS);
+    await pending;
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: '## Заголовок' },
+    });
+  });
+
+  it('ошибки Telegram на rich-методах не роняют watcher', async () => {
+    sendRichMessage.mockRejectedValueOnce(new Error('boom'));
+    await expect(
+      done({ stream_id: 's1', content: 'ответ', message_index: 10 }),
+    ).resolves.toBeUndefined();
+    // rich упал — доставили html-фоллбеком.
+    expect(sendMessage).toHaveBeenCalled();
   });
 });

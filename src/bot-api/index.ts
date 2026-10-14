@@ -17,6 +17,8 @@ export type {
   GetUpdatesParams,
   SendChatActionParams,
   SendMessageParams,
+  SendRichMessageDraftParams,
+  SendRichMessageParams,
   TelegramClientOptions,
 } from './client.js';
 
@@ -27,6 +29,7 @@ export type {
   Chat,
   InlineKeyboardButton,
   InlineKeyboardMarkup,
+  InputRichMessage,
   Message,
   ParseMode,
   Update,
