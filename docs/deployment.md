@@ -93,18 +93,17 @@ helm upgrade --install synth-gateway-telegram charts/synth-gateway-telegram \
   `ca.existingConfigMap`; чарт монтирует файл и выставляет `NODE_EXTRA_CA_CERTS`.
 - **Прокси Bot API** приходит только из Secret (ключ `TELEGRAM_PROXY_URL`), не из
   `env:` чарта.
+- **Существующий PVC:** `--set persistence.existingClaim=<claim>` — чарт PVC не
+  создаёт, а Deployment монтирует указанный claim.
+- **Дополнительные манифесты:** `extraObjects` — список произвольных
+  Kubernetes-объектов; рендерятся как есть (объекты без `metadata.namespace`
+  попадают в namespace релиза).
 
 Пример Secret — `examples/secret.yaml` (обычный Secret, без Helm-шаблонизации):
 
 ```bash
 kubectl -n synth apply -f examples/secret.yaml
 ```
-
-### Managed-деплой (test/preprod)
-
-Развёртывание внутренних managed-инстансов (test/preprod) живёт **в отдельном
-закрытом репозитории деплоя окружения** (GitOps/Fleet) и не входит в этот
-репозиторий. Здесь публикуется только Helm-чарт для self-host/standalone.
 
 ## Проверка конфигурации чарта
 

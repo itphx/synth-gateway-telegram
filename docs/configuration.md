@@ -137,7 +137,7 @@ SYNTH_SERVICE_KEY  >  OIDC (discovery/token URL + client_id + client_secret)  > 
   ```
 
   Отзыв — `POST /api/v2/service-keys/:id/revoke`.
-- **Managed (OIDC/Keycloak).** Статический `SYNTH_API_KEY` не принимается:
+- **OIDC-провайдер.** Статический `SYNTH_API_KEY` не принимается:
   задайте `SYNTH_OIDC_TOKEN_URL` (или `SYNTH_OIDC_DISCOVERY_URL`) +
   `SYNTH_OIDC_CLIENT_ID` + `SYNTH_OIDC_CLIENT_SECRET`. Токен запрашивается
   `grant_type=client_credentials`, кэшируется, обновляется за 30 с до
@@ -180,7 +180,7 @@ env TELEGRAM_PROXY_URL  >  ALL_PROXY  >  HTTPS_PROXY  >  HTTP_PROXY  >  secrets/
   вне git, положите свой локально.
 - **Локально:** `NODE_EXTRA_CA_CERTS=certs/ca.crt node dist/gateway/index.js`.
 - **docker compose:** ro-mount `./certs/ca.crt:/certs/ca.crt` + `NODE_EXTRA_CA_CERTS=/certs/ca.crt`.
-- **K3s/Helm:** `ca.enabled` + `ca.caCert` (inline PEM) либо `ca.existingConfigMap`
+- **Kubernetes/Helm:** `ca.enabled` + `ca.caCert` (inline PEM) либо `ca.existingConfigMap`
   (+ `ca.configMapKey`, `ca.mountPath`); чарт монтирует файл и выставляет env.
 
 ## Мультитенантность (боты → среды Synth)
@@ -256,5 +256,5 @@ Synth («известность» резолвит **ядро**; шлюз рее
 
 - Секреты **не коммитить** и **не печатать в логи** (в лог — только факт
   «задан/не задан» и число записей списка доступа).
-- В K3s/Helm секреты — через `existingSecret`/SealedSecret, не в `values.yaml`.
+- В Kubernetes/Helm секреты — через `existingSecret`/SealedSecret, не в `values.yaml`.
 - В Docker — ro-mount каталога секретов (`./secrets:/run/secrets:ro`).

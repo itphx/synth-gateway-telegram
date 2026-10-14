@@ -4,7 +4,7 @@ import type { GatewayHealth, TokenStatus } from './health.js';
 export type AuthMode = 'service-key' | 'oidc' | 'api-key' | 'none';
 
 /**
- * Конфигурация OIDC client-credentials (managed-режим: backend под OIDC/Keycloak,
+ * Конфигурация OIDC client-credentials (OIDC-провайдер,
  * статический API-ключ не принимается).
  */
 export interface OidcAuthConfig {

@@ -87,8 +87,7 @@ synth-gateway-telegram/
 ## Развёртывание
 
 - Docker / compose / Kubernetes / Helm — [docs/deployment.md](docs/deployment.md).
-- Публикуемый Helm-чарт — `charts/synth-gateway-telegram`; managed-развёртывание
-  внутренних инстансов живёт в закрытом репозитории деплоя окружения.
+- Публикуемый Helm-чарт — `charts/synth-gateway-telegram`.
 - Опубликованные артефакты (по тегу `v*`): образ
   `gitverse.ru/itphx/synth-gateway-telegram:<version>`, чарт
   `synth/synth-gateway-telegram` из реестра
