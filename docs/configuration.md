@@ -151,8 +151,15 @@ synth-gateway-tg --http [--host 0.0.0.0] [--port 7101]
 node scripts/install-into-synth.mjs \
   [--synth-url URL] [--token TOKEN] [--tenant ID] \
   [--mcp-url URL | --service-host HOST] [--only mcp,skills] [--skills-dir DIR] \
+  [--mcp-token TOKEN] [--no-enabled-by-default] \
   [--config PATH] [--data-dir DIR] [--root DIR] [--dry-run] [--help]
 ```
+
+`--mcp-token` (env `SYNTH_MCP_TOKEN`) — bearer-токен MCP-клиентов add-on'а: уходит
+в `config.headers.Authorization` записи реестра (ядро пробрасывает `headers` в
+MCP-клиент, без него подключение к HTTP-MCP шлюза получит 401). По умолчанию
+ставится `enabledByDefault: true` — сервер включён для новых проектов
+(`--no-enabled-by-default` снимает). Токены в лог не печатаются.
 
 Подробности и примеры — [deployment.md](deployment.md) §«Авто-установка MCP и
 скиллов», контракт `provides` — [addon.md](addon.md).

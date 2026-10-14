@@ -119,13 +119,23 @@ Add-on сам регистрирует свои ресурсы в инстанс
 
 Аргументы: `--synth-url`, `--token`, `--tenant`, `--mcp-url` **или**
 `--service-host` (URL MCP собирается как `http://<host>:<provides.mcp.port><path>`),
-`--only mcp,skills` (или флаги `--mcp`/`--skills`), `--skills-dir`, `--config`,
-`--data-dir`, `--root`, `--dry-run`, `--help`.
+`--only mcp,skills` (или флаги `--mcp`/`--skills`), `--skills-dir`, `--mcp-token`
+(env `SYNTH_MCP_TOKEN`), `--no-enabled-by-default`, `--config`, `--data-dir`,
+`--root`, `--dry-run`, `--help`.
+
+Запись реестра создаётся с `enabledByDefault: true` (новые проекты/сессии
+подхватывают сервер; снять — `--no-enabled-by-default`) и, при заданном
+`--mcp-token`, с `config.headers.Authorization = Bearer <токен>` — ядро
+пробрасывает `headers` в MCP-клиент, поэтому Synth подключается к
+`/mcp/<tenant>` авторизованно (без токена HTTP-MCP шлюза отвечает 401). Токен в
+логи не печатается; в кластере его выдаёт чарт (Secret) и передаёт в Job как
+`SYNTH_MCP_TOKEN`.
 
 **Идемпотентность обязательна:** повторный прогон (в т.ч. `helm upgrade`)
 обновляет запись/скилл, а не создаёт дубликаты; при ошибке — понятное сообщение
-и код возврата ≠ 0. Секреты в логи не печатаются. В кластере инсталлятор
-запускается hook-Job'ом чарта (`autoInstall`, см. [deployment.md](deployment.md)).
+и код возврата ≠ 0 (до изменений проверяется, что выбран режим установки для всех
+выбранных сущностей). В кластере инсталлятор запускается hook-Job'ом чарта
+(`autoInstall`, см. [deployment.md](deployment.md)).
 
 ## Три вида аддонов
 

@@ -121,6 +121,17 @@ export interface InstallerOptions {
   skills?: boolean;
   /** Только показать план, ничего не менять. */
   dryRun?: boolean;
+  /**
+   * Bearer-токен MCP-клиентов add-on'а (`--mcp-token` / env `SYNTH_MCP_TOKEN`):
+   * уходит в `config.headers.Authorization` записи реестра (ядро пробрасывает
+   * `headers` в MCP-клиент). В логи не пишется.
+   */
+  mcpToken?: string;
+  /**
+   * Сид «включён по умолчанию для новых проектов» (`enabledByDefault` в записи
+   * реестра / config). По умолчанию `true`; `--no-enabled-by-default` снимает.
+   */
+  enabledByDefault?: boolean;
   /** Standalone: путь к config.yaml (merge `mcp.servers`). */
   configPath?: string;
   /** Standalone: каталог данных инстанса (копирование скиллов). */
@@ -277,6 +288,15 @@ function renderConfigEntry(name: string, config: McpServerConfigInput): string[]
   if (config.url) lines.push(`      url: ${yamlString(config.url)}`);
   if (config.description) lines.push(`      description: ${yamlString(config.description)}`);
   if (config.enabled !== undefined) lines.push(`      enabled: ${config.enabled}`);
+  if (config.enabledByDefault !== undefined) {
+    lines.push(`      enabledByDefault: ${config.enabledByDefault}`);
+  }
+  if (config.headers && Object.keys(config.headers).length > 0) {
+    lines.push('      headers:');
+    for (const [key, value] of Object.entries(config.headers)) {
+      lines.push(`        ${key}: ${yamlString(value)}`);
+    }
+  }
   return lines;
 }
 
@@ -286,6 +306,13 @@ export interface McpServerConfigInput {
   url?: string;
   description?: string;
   enabled?: boolean;
+  /** Сид «включён по умолчанию для НОВЫХ проектов» (`snapshot` на момент создания). */
+  enabledByDefault?: boolean;
+  /**
+   * HTTP-заголовки подключения (AD-071): авторизация MCP-клиента Synth —
+   * `{ Authorization: 'Bearer <GATEWAY_MCP_TOKEN>' }`.
+   */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -423,6 +450,29 @@ function apiErrorText(result: ApiResponse): string {
   return `HTTP ${result.status}`;
 }
 
+/**
+ * Собирает конфигурацию MCP-сервера для записи реестра/`config.yaml`:
+ * `enabled` (мастер-флаг), `enabledByDefault` (сид для новых проектов; по умолчанию
+ * `true`) и `headers.Authorization` при заданном `--mcp-token` (ядро пробрасывает
+ * `headers` в MCP-клиент — без токена подключение к HTTP-MCP шлюза получит 401).
+ * Секрет в логи не попадает: в конфиг уходит, в сообщения — нет.
+ */
+export function buildMcpServerConfig(
+  options: Pick<InstallerOptions, 'mcpToken' | 'enabledByDefault'>,
+  mcpUrl: string,
+  description: string | undefined,
+): McpServerConfigInput {
+  const token = options.mcpToken?.trim();
+  return {
+    type: 'http',
+    url: mcpUrl,
+    ...(description ? { description } : {}),
+    enabled: true,
+    enabledByDefault: options.enabledByDefault !== false,
+    ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+  };
+}
+
 async function installMcpManaged(
   options: InstallerOptions,
   manifest: AddonManifest,
@@ -430,12 +480,11 @@ async function installMcpManaged(
 ): Promise<InstallerResult['mcp']> {
   const mcp = manifest.provides?.mcp;
   if (!mcp) return undefined;
-  const config: McpServerConfigInput = {
-    type: 'http',
-    url: mcpUrl,
-    description: mcp.description ?? `Add-on ${manifest.name ?? mcp.name}`,
-    enabled: true,
-  };
+  const config = buildMcpServerConfig(
+    options,
+    mcpUrl,
+    mcp.description ?? `Add-on ${manifest.name ?? mcp.name}`,
+  );
   const client = {
     synthUrl: options.synthUrl!,
     token: options.token!,
@@ -540,24 +589,41 @@ async function installSkillsManaged(
   return results;
 }
 
+/** Опции standalone-установки MCP (merge `mcp.servers` в config.yaml). */
+export interface StandaloneMcpOptions {
+  /** Путь к `config.yaml` инстанса. */
+  configPath: string;
+  /** Имя записи в `mcp.servers`. */
+  name: string;
+  /** URL MCP-эндпоинта (с подставленным тенантом). */
+  url: string;
+  description?: string;
+  /** Заголовки подключения (Authorization при `--mcp-token`). */
+  headers?: Record<string, string>;
+  /** Сид `enabledByDefault` для новых проектов. */
+  enabledByDefault?: boolean;
+  dryRun?: boolean;
+  log?: (message: string) => void;
+}
+
 /** Standalone: merge `mcp.servers` в config.yaml (идемпотентно, атомарно). */
 export function installMcpStandalone(
-  configPath: string,
-  name: string,
-  mcpUrl: string,
-  description: string | undefined,
-  dryRun: boolean,
-  log: (message: string) => void,
+  options: StandaloneMcpOptions,
 ): { action: 'created' | 'updated' | 'unchanged' | 'dry-run' } {
+  const { configPath, name, url, description, headers, enabledByDefault } = options;
+  const dryRun = options.dryRun === true;
+  const log = options.log ?? (() => {});
   if (!existsSync(configPath)) {
     throw new InstallerError(`не найден config.yaml: ${configPath}`);
   }
   const original = readFileSync(configPath, 'utf8');
   const { content, action } = mergeMcpServerIntoConfig(original, name, {
     type: 'http',
-    url: mcpUrl,
+    url,
     ...(description ? { description } : {}),
     enabled: true,
+    enabledByDefault: enabledByDefault !== false,
+    ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
   });
   if (dryRun) {
     log(`[install] (dry-run) config ${configPath}: mcp.servers.${name} → ${action}`);
@@ -644,6 +710,20 @@ export async function runInstaller(options: InstallerOptions): Promise<Installer
   const dryRun = options.dryRun === true;
   const managed = Boolean(options.synthUrl || options.token);
 
+  // Fail-fast до любых изменений: для выбранных сущностей нужен режим
+  // (managed либо standalone), иначе можно было бы применить часть установки.
+  if (!dryRun) {
+    if (wantMcp && !standaloneConfig && !managed) {
+      throw new InstallerError(
+        'не задан режим установки: managed (--synth-url + --token) или standalone (--config/--data-dir)',
+      );
+    }
+    if (wantSkills && !standaloneDataDir && !managed) {
+      throw new InstallerError(
+        'не задан режим установки скиллов: managed (--synth-url + --token) или standalone (--data-dir)',
+      );
+    }
+  }
   if (dryRun) log('[install] dry-run: реальные изменения не выполняются');
 
   if (wantMcp && mcpProvides) {
@@ -657,14 +737,20 @@ export async function runInstaller(options: InstallerOptions): Promise<Installer
         );
       }
     } else if (standaloneConfig) {
-      const action = installMcpStandalone(
-        standaloneConfig,
-        mcpProvides.name,
-        mcpUrl!,
-        mcpProvides.description,
+      const action = installMcpStandalone({
+        configPath: standaloneConfig,
+        name: mcpProvides.name,
+        url: mcpUrl!,
+        ...(mcpProvides.description !== undefined
+          ? { description: mcpProvides.description }
+          : {}),
+        ...(options.mcpToken?.trim()
+          ? { headers: { Authorization: `Bearer ${options.mcpToken.trim()}` } }
+          : {}),
+        enabledByDefault: options.enabledByDefault !== false,
         dryRun,
         log,
-      );
+      });
       result.mcp = { action: action.action, url: mcpUrl };
     } else if (managed) {
       if (dryRun) {
@@ -783,6 +869,14 @@ export function parseInstallerArgs(argv: string[], env: NodeJS.ProcessEnv = {}):
         if (value) options.skillsDir = value;
         break;
       }
+      case '--mcp-token': {
+        const value = next();
+        if (value) options.mcpToken = value;
+        break;
+      }
+      case '--no-enabled-by-default':
+        options.enabledByDefault = false;
+        break;
       case '--only': {
         const value = next();
         if (value) onlyValue = value;
@@ -825,6 +919,7 @@ export function parseInstallerArgs(argv: string[], env: NodeJS.ProcessEnv = {}):
   if (options.configPath === undefined) options.configPath = envOr('SYNTH_CONFIG');
   if (options.dataDir === undefined) options.dataDir = envOr('SYNTH_DATA_DIR');
   if (options.skillsDir === undefined) options.skillsDir = envOr('SYNTH_ADDON_SKILLS_DIR');
+  options.mcpToken ??= envOr('SYNTH_MCP_TOKEN');
 
   // Фильтр сущностей: `--only mcp,skills` (общий контракт с чартом) либо
   // флаги `--mcp`/`--skills`. Без них — всё из `provides`.
@@ -869,6 +964,10 @@ export function installerHelp(): string {
     '  --only LIST      что устанавливать: mcp,skills (по умолчанию — всё из provides)',
     '  --mcp / --skills синонимы-фильтры для --only',
     '  --skills-dir DIR корень дерева скиллов (аддон без образа; env SYNTH_ADDON_SKILLS_DIR)',
+    '  --mcp-token TOK  bearer-токен MCP-клиентов add-on\'а → config.headers.Authorization',
+    '                   записи реестра (env SYNTH_MCP_TOKEN; в логи не попадает)',
+    '  --no-enabled-by-default  не включать MCP-сервер по умолчанию для новых',
+    '                   проектов (по умолчанию enabledByDefault: true)',
     '  --dry-run        показать план, ничего не менять',
     '  --config PATH    standalone: merge mcp.servers в config.yaml (env SYNTH_CONFIG)',
     '  --data-dir DIR   standalone: копировать скиллы в {dataDir}/skills (env SYNTH_DATA_DIR)',

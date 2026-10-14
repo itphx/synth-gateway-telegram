@@ -155,7 +155,11 @@ autoInstall:
 mcp:
   enabled: true        # контейнер MCP + порт Service
   port: 7101
-  tokenSecretName: ""  # Secret с GATEWAY_MCP_TOKEN; пусто — ключ берётся из existingSecret
+  tokenSecret:
+    create: true       # чарт сам создаёт Secret с токеном (стабилен при upgrade)
+    name: ""           # пусто → mcp.tokenSecretName, иначе <fullname>-mcp-token
+    key: GATEWAY_MCP_TOKEN
+  tokenSecretName: ""  # когда create=false: имя СУЩЕСТВУЮЩЕГО Secret с токеном
   tokenSecretKey: GATEWAY_MCP_TOKEN
 ```
 
@@ -166,12 +170,59 @@ helm upgrade --install synth-gateway-telegram charts/synth-gateway-telegram \
   --namespace synth --create-namespace \
   --set existingSecret=synth-gateway-telegram-secrets \
   --set tenantsFile.enabled=true --set tenantsFile.secretName=synth-gateway-telegram-tenants \
-  --set mcp.tokenSecretName=synth-gateway-telegram-mcp \
+  --set mcp.tokenSecret.create=true \
   --set autoInstall.enabled=true \
   --set autoInstall.url=http://synth-backend.synth.svc.cluster.local:5000/api/v2 \
   --set autoInstall.tenant=dev \
   --set autoInstall.installerSecretName=synth-gateway-telegram-installer
 ```
+
+### Токен MCP и авторизация записи реестра
+
+MCP-эндпоинт шлюза защищён bearer-токеном, и **Synth-MCP-клиент тоже должен
+им авторизоваться** — иначе подключение к `/mcp/<tenant>` получит 401. Поэтому
+ядро пробрасывает `headers` из записи реестра, а инсталлятор кладёт туда
+`Authorization: Bearer <токен>`.
+
+Источник токена (приоритет):
+
+| Вариант | Как включить | Что происходит |
+|---|---|---|
+| **чарт создаёт токен** | `mcp.tokenSecret.create=true` | Secret `<fullname>-mcp-token` (ключ `GATEWAY_MCP_TOKEN`) со значением `synth_<43 симв.>`; значение **переиспользуется при `helm upgrade`** (`lookup`) и не удаляется при `helm uninstall` (`helm.sh/resource-policy: keep`) |
+| **свой существующий Secret** | `mcp.tokenSecretName=<secret>` (`mcp.tokenSecretKey`) | токен берётся из указанного Secret/ключа (kubectl/SealedSecret/внешний секрет-менеджер) |
+| **ключ в `existingSecret`** | `existingSecret=<secret>` с ключом `GATEWAY_MCP_TOKEN` | токен подхватывается через `envFrom`; в hook-Job не пробрасывается (ключ не адресуется явно) |
+
+Токен попадает:
+
+1. в контейнер `mcp` — env `GATEWAY_MCP_TOKEN` (при `create=true`/`tokenSecretName`
+   через `secretKeyRef`: значение всегда из нужного ключа, приоритетнее `envFrom`);
+2. в **hook-Job** — env `SYNTH_MCP_TOKEN` из того же Secret → инсталлятор пишет
+   `config.headers.Authorization` при создании/обновлении записи реестра
+   (`POST /mcp/registry`, `PUT /mcp/registry/:id`, `PUT /mcp/servers/:name`).
+
+Значение токена не хранится в `values` и не печатается в логах Job'а; вне
+кластера (`helm template`) `lookup` ничего не находит, поэтому при рендере токен
+генерируется заново — это нормально, рендер не применяется.
+
+Проверка токена и заголовка записи:
+
+```bash
+# токен, который использует контейнер MCP (значение — секрет, не коммитить)
+kubectl -n synth get secret synth-gateway-telegram-mcp-token \
+  -o jsonpath='{.data.GATEWAY_MCP_TOKEN}' | base64 -d; echo
+
+# токен не меняется при upgrade (lookup видит существующий Secret)
+helm upgrade synth-gateway-telegram charts/synth-gateway-telegram -n synth --reuse-values
+kubectl -n synth get secret synth-gateway-telegram-mcp-token -o jsonpath='{.metadata.resourceVersion}'; echo
+
+# в записи реестра есть headers.Authorization (ADMIN-ключом инстанса)
+curl -s -H "Authorization: Bearer <ADMIN-ключ>" \
+  http://synth-backend.synth.svc.cluster.local:5000/api/v2/mcp/registry | grep -o 'Authorization[^,]*'
+```
+
+Ротация: удалите Secret и выполните `helm upgrade` — чарт создаст Secret с новым
+токеном, а `post-upgrade` Job обновит запись реестра (иначе Synth-MCP-клиент
+какое-то время получал бы 401).
 
 ### Installer-ключ (Secret)
 
@@ -215,12 +266,18 @@ curl -s -H "Authorization: Bearer <ключ>" http://synth-backend:5000/api/v2/s
 ```bash
 # план (ничего не меняет)
 node scripts/install-into-synth.mjs --synth-url http://127.0.0.1:5000/api/v2 \
-  --token "$SYNTH_INSTALL_TOKEN" --tenant dev --service-host 127.0.0.1 --dry-run
+  --token "$SYNTH_INSTALL_TOKEN" --mcp-token "$SYNTH_MCP_TOKEN" \
+  --tenant dev --service-host 127.0.0.1 --dry-run
 
 # standalone: merge mcp.servers в config.yaml + скиллы в {data-dir}/skills
 node scripts/install-into-synth.mjs --config ~/.config/synth/config.yaml \
   --data-dir ~/.local/share/synth/data --service-host 127.0.0.1 --tenant dev
 ```
+
+Инсталлятор принимает `--mcp-token`/`SYNTH_MCP_TOKEN` (bearer MCP-клиентов →
+`config.headers.Authorization` записи реестра) и по умолчанию ставит
+`enabledByDefault: true` (новые проекты подхватывают сервер; снять —
+`--no-enabled-by-default`). Токены в логи не печатаются.
 
 `helm uninstall` удаляет hook-Job, но уже установленные в Synth ресурсы (запись
 MCP-реестра, скилл) остаются — это данные инстанса, а не релиза.

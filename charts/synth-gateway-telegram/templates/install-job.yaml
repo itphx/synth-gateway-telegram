@@ -82,6 +82,16 @@ spec:
                 secretKeyRef:
                   name: {{ required "autoInstall.installerSecretName обязателен при autoInstall.enabled=true" .Values.autoInstall.installerSecretName }}
                   key: {{ .Values.autoInstall.installerSecretKey | default "token" }}
+            {{- if and .Values.autoInstall.mcp (include "synth-gateway-telegram.hasExplicitMcpTokenSecret" .) }}
+            # Bearer-токен MCP-клиентов add-on'а: инсталлятор положит его в
+            # config.headers.Authorization записи реестра (Synth-MCP-клиент
+            # авторизуется им при подключении к /mcp/<tenant>). Не логируется.
+            - name: SYNTH_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "synth-gateway-telegram.mcpTokenSecretName" . }}
+                  key: {{ include "synth-gateway-telegram.mcpTokenSecretKey" . }}
+            {{- end }}
           {{- if .Values.autoInstall.resources }}
           resources:
             {{- toYaml .Values.autoInstall.resources | nindent 12 }}

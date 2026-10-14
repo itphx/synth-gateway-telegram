@@ -40,7 +40,7 @@ MCP по HTTP (Streamable HTTP) — второй контейнер того ж�
     http://{{ include "synth-gateway-telegram.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.mcp.port }}/mcp/<tenantId>
 
   Проверка (без auth): /health; прочие запросы — Authorization: Bearer <MCP-токен>.
-  Токен: {{ if .Values.mcp.tokenSecretName }}Secret {{ .Values.mcp.tokenSecretName }} (ключ {{ .Values.mcp.tokenSecretKey }}){{ else }}ключ {{ .Values.mcp.tokenSecretKey }} в existingSecret{{ if not .Values.existingSecret }} — ВНИМАНИЕ: Secret не задан, контейнер MCP не стартует{{ end }}{{ end }}.
+  Токен: {{ if .Values.mcp.tokenSecret.create }}Secret {{ include "synth-gateway-telegram.mcpTokenSecretName" . }} (ключ {{ include "synth-gateway-telegram.mcpTokenSecretKey" . }}) — создан чартом, стабилен при `helm upgrade`{{ else if .Values.mcp.tokenSecretName }}Secret {{ .Values.mcp.tokenSecretName }} (ключ {{ .Values.mcp.tokenSecretKey }}){{ else if .Values.existingSecret }}ключ {{ .Values.mcp.tokenSecretKey }} в existingSecret {{ .Values.existingSecret }}{{ else }}НЕ ЗАДАН (ни mcp.tokenSecret.create, ни mcp.tokenSecretName, ни existingSecret) — контейнер MCP не стартует{{ end }}.
 
   Подключение в Synth (реестр MCP-серверов):
 
@@ -77,7 +77,15 @@ MCP и внешним событиям; точек расширения Extensio
 Проверить результат:
 
   kubectl -n {{ .Release.Namespace }} get job {{ include "synth-gateway-telegram.installJobName" . }}
-  kubectl -n {{ .Release.Namespace }} logs job/{{ include "synth-gateway-telegram.installJobName" . }}   # [install] … (токен не печатается)
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "synth-gateway-telegram.installJobName" . }}   # [install] … (токены не печатаются)
+
+{{- if and .Values.autoInstall.mcp (include "synth-gateway-telegram.hasExplicitMcpTokenSecret" .) }}
+
+  Запись реестра MCP создаётся с заголовком авторизации из Secret
+  {{ include "synth-gateway-telegram.mcpTokenSecretName" . }}
+  (ключ {{ include "synth-gateway-telegram.mcpTokenSecretKey" . }}) → SYNTH_MCP_TOKEN:
+  Synth-MCP-клиент подключается к /mcp/<tenant> с Authorization: Bearer <токен>.
+{{- end }}
 
   # в инстансе Synth (ключом с правами чтения):
   curl -s -H "Authorization: Bearer <ключ>" {{ .Values.autoInstall.url }}/mcp/registry

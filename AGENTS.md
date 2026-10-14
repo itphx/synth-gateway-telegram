@@ -48,7 +48,9 @@ Telegram-бот ↔ платформа внешних событий (`POST /api
     (`src/installer/install.ts`) повторным прогоном **обновляет** запись
     MCP-реестра/скилл, а не создаёт дубликаты (managed: `POST`→409→`PUT`;
     standalone: перезапись тем же содержимым); ошибка → понятное сообщение и
-    exit-code ≠ 0.
+    exit-code ≠ 0 (режим установки проверяется до изменений). Запись реестра —
+    с `enabledByDefault: true` (снять `--no-enabled-by-default`) и, при
+    `--mcp-token`/`SYNTH_MCP_TOKEN`, с `config.headers.Authorization`.
 12. **Коммит** — только по явной просьбе; новые зависимости — с разрешения.
 
 ## Границы
@@ -92,6 +94,12 @@ scripts/       # install-into-synth.mjs — обёртка инсталлято�
   `templates/install-job.yaml` (`autoInstall`, post-install/post-upgrade) с
   общим контрактом шаблона add-on'ов (`addons/synth-addon-template`);
   `autoInstall.mcp=true` требует MCP-эндпоинт (`mcp.enabled` или `autoInstall.mcpUrl`).
+- **Токен MCP-клиентов.** HTTP-MCP защищён bearer-токеном, и Synth-MCP-клиент
+  авторизуется им через `headers` записи реестра: чарт умеет сам создать токен
+  (`mcp.tokenSecret.create=true` → Secret `<fullname>-mcp-token`, стабильный при
+  `helm upgrade` через `lookup`, `resource-policy: keep`), тот же Secret читает
+  контейнер `mcp` (`GATEWAY_MCP_TOKEN`) и hook-Job (`SYNTH_MCP_TOKEN`), а
+  инсталлятор пишет `config.headers.Authorization` в create- и update-ветках.
 - **Образ** (`docker/Dockerfile`) содержит `addon.json`, `skills/` и
   `scripts/install-into-synth.mjs` — они нужны hook-Job'у; ENTRYPOINT сервиса
   при этом не меняется.

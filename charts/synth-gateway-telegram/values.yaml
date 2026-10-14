@@ -51,9 +51,22 @@ service:
 mcp:
   enabled: true
   port: 7101
-  # Secret с bearer-токеном клиентов MCP (ключ tokenSecretKey). Пусто — ключ
-  # берётся из existingSecret (envFrom). Без токена MCP-контейнер не стартует
-  # (fail-fast), значения токена в values не хранить.
+  # Источник bearer-токена клиентов MCP (ключ `GATEWAY_MCP_TOKEN`). Приоритет:
+  #   1) tokenSecret.create=true — чарт сам создаёт Secret со сгенерированным
+  #      токеном (`synth_` + 43 символа), стабильным при `helm upgrade` (lookup);
+  #      токен попадает и в контейнер MCP, и в hook-Job (SYNTH_MCP_TOKEN →
+  #      Authorization: Bearer … в записи реестра); value не в git и не в логах;
+  #   2) tokenSecretName — имя СУЩЕСТВУЮЩЕГО Secret (kubectl/SealedSecret);
+  #   3) existingSecret — ключ `GATEWAY_MCP_TOKEN` внутри него (envFrom).
+  # Без токена контейнер MCP не стартует (fail-fast).
+  tokenSecret:
+    # true → чарт создаёт Secret с токеном; false → берём существующий.
+    create: false
+    # Имя создаваемого Secret. Пусто → mcp.tokenSecretName, иначе <fullname>-mcp-token.
+    name: ""
+    # Ключ создаваемого Secret.
+    key: GATEWAY_MCP_TOKEN
+  # Имя существующего Secret с токеном (когда tokenSecret.create=false).
   tokenSecretName: ""
   tokenSecretKey: GATEWAY_MCP_TOKEN
   resources:

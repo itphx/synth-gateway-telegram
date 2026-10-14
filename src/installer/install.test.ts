@@ -312,6 +312,126 @@ describe('managed-установка MCP', () => {
   });
 });
 
+describe('managed-установка MCP: headers и enabledByDefault', () => {
+  const MCP_TOKEN = 'mcp-bearer-token-1';
+
+  it('create: заголовок Authorization и enabledByDefault в config записи', async () => {
+    const root = fixtureRoot();
+    const { fetchImpl, calls } = mockFetch({
+      'GET /api/v2/mcp/registry': { status: 200, body: { entries: [] } },
+      'POST /api/v2/mcp/registry': { status: 201, body: {} },
+    });
+    const lines: string[] = [];
+    await runInstaller({
+      ...MANAGED,
+      mcpToken: MCP_TOKEN,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl,
+      log: (message) => lines.push(message),
+    });
+    const post = calls.find((call) => call.method === 'POST');
+    expect(post?.body).toMatchObject({
+      config: {
+        type: 'http',
+        headers: { Authorization: `Bearer ${MCP_TOKEN}` },
+        enabledByDefault: true,
+        enabled: true,
+      },
+    });
+    // Токен не попадает в логи.
+    expect(lines.join('\n')).not.toContain(MCP_TOKEN);
+  });
+
+  it('update по id реестра: заголовок сохраняется', async () => {
+    const root = fixtureRoot();
+    const { fetchImpl, calls } = mockFetch({
+      'GET /api/v2/mcp/registry': {
+        status: 200,
+        body: { entries: [{ id: 'mcp-1', name: 'synth-gateway-telegram' }] },
+      },
+      'PUT /api/v2/mcp/registry/mcp-1': { status: 200, body: {} },
+    });
+    await runInstaller({
+      ...MANAGED,
+      mcpToken: MCP_TOKEN,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl,
+      log: () => {},
+    });
+    expect(calls[1]?.body).toMatchObject({
+      config: { headers: { Authorization: `Bearer ${MCP_TOKEN}` }, enabledByDefault: true },
+    });
+  });
+
+  it('update через PUT /mcp/servers/:name: заголовок сохраняется', async () => {
+    const root = fixtureRoot();
+    const { fetchImpl, calls } = mockFetch({
+      'GET /api/v2/mcp/registry': { status: 200, body: { entries: [] } },
+      'POST /api/v2/mcp/registry': { status: 409, body: { error: { code: 'CONFLICT' } } },
+      'PUT /api/v2/mcp/servers/synth-gateway-telegram': { status: 200, body: {} },
+    });
+    await runInstaller({
+      ...MANAGED,
+      mcpToken: MCP_TOKEN,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl,
+      log: () => {},
+    });
+    const put = calls.find((call) => call.method === 'PUT');
+    expect(put?.body).toMatchObject({
+      config: { headers: { Authorization: `Bearer ${MCP_TOKEN}` } },
+    });
+  });
+
+  it('без --mcp-token headers отсутствуют (enabledByDefault — есть)', async () => {
+    const root = fixtureRoot();
+    const { fetchImpl, calls } = mockFetch({
+      'GET /api/v2/mcp/registry': { status: 200, body: { entries: [] } },
+      'POST /api/v2/mcp/registry': { status: 201, body: {} },
+    });
+    await runInstaller({
+      ...MANAGED,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl,
+      log: () => {},
+    });
+    const config = (calls.find((call) => call.method === 'POST')?.body as {
+      config?: Record<string, unknown>;
+    }).config;
+    expect(config).not.toHaveProperty('headers');
+    expect(config?.enabledByDefault).toBe(true);
+  });
+
+  it('--no-enabled-by-default снимает сид для новых проектов', async () => {
+    const root = fixtureRoot();
+    const { fetchImpl, calls } = mockFetch({
+      'GET /api/v2/mcp/registry': { status: 200, body: { entries: [] } },
+      'POST /api/v2/mcp/registry': { status: 201, body: {} },
+    });
+    await runInstaller({
+      ...MANAGED,
+      enabledByDefault: false,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl,
+      log: () => {},
+    });
+    expect(
+      (calls.find((call) => call.method === 'POST')?.body as { config?: Record<string, unknown> })
+        .config?.enabledByDefault,
+    ).toBe(false);
+  });
+});
+
 describe('managed-установка скиллов', () => {
   it('создаёт скилл и пересканирует реестр', async () => {
     const root = fixtureRoot();
@@ -478,8 +598,41 @@ describe('standalone-режим', () => {
 
   it('installMcpStandalone: нет config.yaml → понятная ошибка', () => {
     expect(() =>
-      installMcpStandalone(join(tmpDir('gateway-installer-'), 'nope.yaml'), 'x', 'http://x/mcp/1', undefined, false, () => {}),
+      installMcpStandalone({
+        configPath: join(tmpDir('gateway-installer-'), 'nope.yaml'),
+        name: 'x',
+        url: 'http://x/mcp/1',
+      }),
     ).toThrow(/не найден config\.yaml/);
+  });
+
+  it('installMcpStandalone: пишет headers и enabledByDefault в config.yaml', () => {
+    const root = fixtureRoot();
+    const configPath = join(root, 'config.yaml');
+    writeFileSync(configPath, 'core:\n  port: 5000\n');
+    const action = installMcpStandalone({
+      configPath,
+      name: 'synth-gateway-telegram',
+      url: 'http://gw:7101/mcp/dev',
+      description: 'Telegram-шлюз: тулы tg_*',
+      headers: { Authorization: 'Bearer tok-1' },
+      enabledByDefault: true,
+    });
+    expect(action.action).toBe('created');
+    const written = readFileSync(configPath, 'utf8');
+    expect(written).toContain('      enabledByDefault: true');
+    expect(written).toContain('      headers:\n        Authorization: "Bearer tok-1"');
+
+    // Идемпотентность: тот же прогон — без изменений.
+    const again = installMcpStandalone({
+      configPath,
+      name: 'synth-gateway-telegram',
+      url: 'http://gw:7101/mcp/dev',
+      description: 'Telegram-шлюз: тулы tg_*',
+      headers: { Authorization: 'Bearer tok-1' },
+      enabledByDefault: true,
+    });
+    expect(again.action).toBe('unchanged');
   });
 
   it('installSkillStandalone копирует каталог и обновляет существующий', () => {
@@ -636,6 +789,20 @@ describe('parseInstallerArgs / main', () => {
     });
     expect(result.skills).toEqual([{ name: 'gateway-telegram', action: 'created' }]);
     expect((calls[0]?.body as { description?: string }).description).toBe('Из ConfigMap');
+  });
+
+  it('--mcp-token / --no-enabled-by-default и env SYNTH_MCP_TOKEN', () => {
+    const args = parseInstallerArgs(
+      ['--mcp-token', 'tok-1', '--no-enabled-by-default', '--mcp-url', 'http://m:7101'],
+      {},
+    );
+    expect(args.options.mcpToken).toBe('tok-1');
+    expect(args.options.enabledByDefault).toBe(false);
+
+    const fromEnv = parseInstallerArgs([], { SYNTH_MCP_TOKEN: 'env-tok' });
+    expect(fromEnv.options.mcpToken).toBe('env-tok');
+    // По умолчанию сид не снят (enabledByDefault вычисляется как true).
+    expect(fromEnv.options.enabledByDefault).toBeUndefined();
   });
 
   it('main: exit 0 при dry-run и манифесте в --root', async () => {

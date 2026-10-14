@@ -74,12 +74,15 @@ HTTP-режим: путь `/mcp/<tenantId>` (тенанты — из `tenants.js
 managed — через API v2 (`/mcp/registry`, `/skills*`), standalone — merge
 `mcp.servers` в `config.yaml` + копирование скиллов в `{dataDir}/skills`.
 В кластере это делает hook-Job чарта (`autoInstall`, `post-install,post-upgrade`),
-токен — из Secret и в логи не попадает.
+токен — из Secret и в логи не попадает; чарт умеет сам создать токен MCP-клиентов
+(`mcp.tokenSecret.create=true`, стабильный при `helm upgrade`) и пробрасывает его
+в запись реестра как `Authorization: Bearer …` (иначе MCP-клиент Synth получит 401).
 
 ```bash
 # план установки (изменений нет)
 node scripts/install-into-synth.mjs --synth-url http://127.0.0.1:5000/api/v2 \
-  --token "$SYNTH_INSTALL_TOKEN" --tenant dev --service-host 127.0.0.1 --dry-run
+  --token "$SYNTH_INSTALL_TOKEN" --mcp-token "$SYNTH_MCP_TOKEN" \
+  --tenant dev --service-host 127.0.0.1 --dry-run
 ```
 
 Контракт `provides`, три вида аддонов и HTTP-MCP — [docs/addon.md](docs/addon.md);

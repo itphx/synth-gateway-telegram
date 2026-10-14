@@ -61,3 +61,39 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "synth-gateway-telegram.serviceHost" -}}
 {{- printf "%s.%s.svc.cluster.local" (include "synth-gateway-telegram.fullname" .) .Release.Namespace }}
 {{- end }}
+
+{{/*
+Имя Secret с bearer-токеном MCP-клиентов (`GATEWAY_MCP_TOKEN`):
+  1) mcp.tokenSecret.create=true → mcp.tokenSecret.name > mcp.tokenSecretName > <fullname>-mcp-token;
+  2) иначе mcp.tokenSecretName > existingSecret (ключ ожидается внутри existingSecret).
+Пусто — отдельного источника нет (контейнер MCP не стартует без токена — fail-fast).
+*/}}
+{{- define "synth-gateway-telegram.mcpTokenSecretName" -}}
+{{- if .Values.mcp.tokenSecret.create -}}
+{{- .Values.mcp.tokenSecret.name | default .Values.mcp.tokenSecretName | default (printf "%s-mcp-token" (include "synth-gateway-telegram.fullname" .)) -}}
+{{- else -}}
+{{- .Values.mcp.tokenSecretName | default .Values.existingSecret -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Ключ внутри Secret с токеном MCP: при tokenSecret.create — mcp.tokenSecret.key,
+иначе mcp.tokenSecretKey. Оба по умолчанию GATEWAY_MCP_TOKEN.
+*/}}
+{{- define "synth-gateway-telegram.mcpTokenSecretKey" -}}
+{{- if .Values.mcp.tokenSecret.create -}}
+{{- .Values.mcp.tokenSecret.key | default "GATEWAY_MCP_TOKEN" -}}
+{{- else -}}
+{{- .Values.mcp.tokenSecretKey | default "GATEWAY_MCP_TOKEN" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Задан ли у чарта явный источник токена MCP (создаваемый Secret или tokenSecretName).
+Пусто — токен не пробрасывается адресно (возможен ключ в existingSecret через envFrom).
+*/}}
+{{- define "synth-gateway-telegram.hasExplicitMcpTokenSecret" -}}
+{{- if or .Values.mcp.tokenSecret.create .Values.mcp.tokenSecretName -}}
+true
+{{- end -}}
+{{- end }}

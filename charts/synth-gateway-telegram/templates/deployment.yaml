@@ -185,7 +185,17 @@ spec:
             - name: NODE_EXTRA_CA_CERTS
               value: {{ .Values.ca.mountPath | quote }}
             {{- end }}
-          {{- if or .Values.existingSecret .Values.mcp.tokenSecretName }}
+            {{- if include "synth-gateway-telegram.hasExplicitMcpTokenSecret" . }}
+            # Токен MCP-клиентов: ключ из явного Secret (созданного чартом при
+            # tokenSecret.create=true либо указанного в mcp.tokenSecretName).
+            # Env приоритетнее envFrom — значение всегда из нужного ключа.
+            - name: GATEWAY_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "synth-gateway-telegram.mcpTokenSecretName" . }}
+                  key: {{ include "synth-gateway-telegram.mcpTokenSecretKey" . }}
+            {{- end }}
+          {{- if or .Values.existingSecret (and .Values.mcp.tokenSecretName (ne .Values.mcp.tokenSecretName .Values.existingSecret)) }}
           envFrom:
             {{- if .Values.existingSecret }}
             # Bot-токен/креды Synth и (при наличии) GATEWAY_MCP_TOKEN.
@@ -193,7 +203,9 @@ spec:
                 name: {{ .Values.existingSecret }}
             {{- end }}
             {{- if and .Values.mcp.tokenSecretName (ne .Values.mcp.tokenSecretName .Values.existingSecret) }}
-            # Отдельный Secret с bearer-токеном MCP-клиентов (ключ GATEWAY_MCP_TOKEN).
+            # Существующий Secret с bearer-токеном MCP-клиентов (остальные его
+            # ключи, напр. TELEGRAM_BOT_TOKEN, тоже подхватываются). Токен MCP
+            # дополнительно задан явно ниже — конкретным ключом (secretKeyRef).
             - secretRef:
                 name: {{ .Values.mcp.tokenSecretName }}
             {{- end }}
