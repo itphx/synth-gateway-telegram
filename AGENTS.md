@@ -102,7 +102,9 @@ scripts/       # install-into-synth.mjs — обёртка инсталлято�
   инсталлятор пишет `config.headers.Authorization` в create- и update-ветках.
 - **Образ** (`docker/Dockerfile`) содержит `addon.json`, `skills/` и
   `scripts/install-into-synth.mjs` — они нужны hook-Job'у; ENTRYPOINT сервиса
-  при этом не меняется.
+  при этом не меняется. После копирования runtime-стадия выравнивает права
+  (`chmod -R a+rX`): под работает под uid 1000 (не root), а чек-аут/`COPY` может
+  принести групповой режим (`-rw-rw----`) → иначе `EACCES` на installer'е.
 
 ## Релиз и публикация
 

@@ -42,6 +42,16 @@ COPY addon.json ./
 COPY scripts/install-into-synth.mjs ./scripts/
 COPY skills ./skills
 
+# Права в образе не должны зависеть от режимов в git/чек-ауте: в рабочей копии
+# файлы могут иметь групповой режим (`-rw-rw----`, каталоги `drwxrws---` —
+# umask 002 / setgid-каталоги), а `COPY` сохраняет права как есть. Тогда под
+# (uid 1000, не root) не читает их → `EACCES open '/app/scripts/install-into-synth.mjs'`
+# в hook-Job. Даём всем на чтение (`a+r`) и на обход каталогов (`X` — только
+# каталоги/уже исполняемые файлы); владелец остаётся root, uid 1000 хватает
+# прав на чтение. `dist` — из builder-стадии (там права зависят от umask сборки).
+RUN chmod -R a+rX /app/addon.json /app/skills /app/scripts /app/dist \
+ && chmod a+r /app/package.json /app/pnpm-lock.yaml
+
 # JSON-хранилище (offset/дедуп/привязки чатов; монтируется volume'ом).
 ENV GATEWAY_HOST=0.0.0.0
 ENV GATEWAY_PORT=7100
