@@ -24,7 +24,17 @@ Telegram-бот ↔ платформа внешних событий (`POST /api
 6. **`GET /health` — без auth.**
 7. **Идемпотентность.** Входные апдейты дедуплицируются (`update_id`); в
    `POST /events` передаётся стабильный `dedupKey: telegram:<bot>:<update_id>`.
-   Исходящие ответы — дедуп по `stream_id`/`message_index` (персистентно).
+   Исходящие ответы — дедуп по `stream_id`/`message:<sessionId>:<index>`
+   (персистентно). Ядро на каждый ответ шлёт и `stream.done` (полный текст), и
+   `message.added` (обрезанный до 500 символов контент) — `message.added`
+   (assistant) доставляется только как **отложенный фоллбек** (grace 3 c): если
+   за паузу пришёл `stream.done`/`stream.cancelled`, он его отменяет (защита от
+   дубля «стрим + огрызок»).
+   **Reply-адресат** фиксируется по прогону, а не по «последнему входящему»:
+   `InboundRegistry` (per-tenant, лимит 200) связывает `dedupKey → messageId`
+   (поллер при публикации) и `stream_id → messageId` (watcher по
+   `message.added(user).metadata`), иначе при нескольких входящих подряд шапка
+   reply уезжала бы на последнее; fallback — `SessionRoute.lastInboundMessageId`.
 8. **Fail-closed список доступа.** Пользователь/чат вне allowlist → событие не
    публикуется (`normalizeUpdate` → `null`).
 9. **Типы Bot API — только из `@grammyjs/types`** (единственный источник истины).
@@ -43,8 +53,10 @@ Telegram-бот ↔ платформа внешних событий (`POST /api
 ## Структура
 
 ```text
-src/gateway/   # bin synth-gateway-telegram — сервис (поллер, нормализация, ingest, watcher, markdown→Telegram-HTML, health, хранилище)
-src/mcp/       # bin synth-gateway-tg — MCP-сервер (stdio), тулы tg_*
+src/gateway/   # bin synth-gateway-telegram — сервис (поллер, нормализация, ingest, watcher, health, хранилище)
+│              #   markdown.ts — Markdown → Telegram-HTML (чанкинг ≤4096, балансировка тегов)
+│              #   inbound.ts  — InboundRegistry: dedupKey/stream_id → messageId (reply-адресат)
+src/mcp/       # bin synth-gateway-tg — MCP-сервер (stdio), тулы tg_*; скилл — skills/gateway-telegram/SKILL.md
 src/bot-api/   # клиент Telegram Bot API (fetch + прокси), типы из @grammyjs/types
 ```
 
@@ -80,6 +92,7 @@ Go-шаблон GitVerse CI).
 | Политика неизвестного отправителя | `src/gateway/unknown-action.ts` |
 | Явные команды бота | `src/gateway/commands.ts`, `command-handler.ts` |
 | Обратная доставка ответов (SSE) | `src/gateway/watcher.ts` |
+| reply-адресат прогона / реестр входящих | `src/gateway/inbound.ts`, `src/gateway/watcher.ts` |
 | Режимы отправки ответов (`parseMode`: plain/html/**markdown** rich) | `src/gateway/watcher.ts`, `src/bot-api/client.ts`, `docs/configuration.md` §«Режимы отправки ответов» |
 | Публикация событий (API v2) | `src/gateway/ingest.ts` |
 | Релиз / публикация (Docker/Helm) | `.gitverse/workflows/release.yaml`, `scripts/`, `docs/deployment.md` |

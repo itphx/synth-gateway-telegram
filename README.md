@@ -35,6 +35,20 @@ Telegram Bot API                 synth-gateway-telegram                    Synth
 стриминг ответа черновиком в приватных чатах; детали и фоллбеки —
 [docs/configuration.md](docs/configuration.md) §«Режимы отправки ответов».
 
+Возможности доставки ответов (кратко):
+
+- **Стриминг** — ответ агента появляется и правится прямо в чате (live-сообщение;
+  в `markdown` — эфемерным rich-черновиком, только приватные чаты).
+- **«Печатает…»** — статус `typing` сразу и каждые 4 c, пока стрим активен
+  (watchdog простоя 60 c гасит индикатор).
+- **`/stop`** — прерывает активный ответ агента в сессии чата
+  (`POST /sessions/:id/abort`); ответ помечается «⏹ Остановлено».
+- **Rich-таблицы** — `parseMode: markdown` рендерит нативные таблицы Bot API 10.1;
+  штатный `parse_mode: Markdown`/`MarkdownV2` таблиц **не** умеет (нужен rich).
+- **Reply на источник** — ответ приходит reply-ем на то сообщение, на которое
+  отвечает агент, а не на последнее входящее (даже если во время генерации пришли
+  новые сообщения).
+
 ## Быстрый старт
 
 ```bash
@@ -86,6 +100,7 @@ cp .env.example .env && docker compose up --build
 synth-gateway-telegram/
 ├── src/
 │   ├── gateway/     # сервис synth-gateway-telegram (bin): поллер, нормализация, ingest, watcher, health
+│   │                #   markdown.ts — Markdown → Telegram-HTML; inbound.ts — InboundRegistry (reply-адресат)
 │   ├── mcp/         # MCP-сервер synth-gateway-tg (bin, stdio): тулы tg_*
 │   └── bot-api/     # клиент Telegram Bot API (fetch + прокси)
 ├── charts/synth-gateway-telegram/    # Helm-чарт (k8s + NOTES.txt)
