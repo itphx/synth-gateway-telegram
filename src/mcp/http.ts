@@ -4,6 +4,14 @@
  * Зачем: в K8s stdio-MCP не работает (движок не спавнит процесс шлюза) —
  * Synth подключает MCP-сервер по HTTP (`mcp.servers.<name>.type: http`).
  *
+ * **Stateless.** HTTP-транспорт работает без MCP-сессий: на каждый запрос
+ * создаётся свежий `McpServer` + `StreamableHTTPServerTransport`
+ * (`sessionIdGenerator: undefined`), session id не выдаётся, заголовок
+ * `mcp-session-id` не используется и не валидируется, ресурсы закрываются по
+ * завершении ответа. Тулы шлюза stateless (per-tenant контекст кэшируется
+ * отдельно), поэтому рестарт пода не ломает уже подключённые клиенты: старый
+ * `mcp-session-id` просто игнорируется, а не даёт 404.
+ *
  * Мультитенантность: путь `/mcp/<tenantId>` — контекст инструментов (токен бота,
  * прокси, dataDir, synthUrl/serviceKey) берётся из `tenants.json` **этого**
  * тенанта. Неизвестный тенант → 404. Всё на одном порту.
@@ -15,11 +23,10 @@
  * `GET /health` — без аутентификации (пробы деплоя).
  */
 
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { TelegramClient } from '../bot-api/index.js';
 import {
@@ -140,12 +147,6 @@ export function buildTenantContext(
   };
 }
 
-interface SessionEntry {
-  tenantId: string;
-  transport: StreamableHTTPServerTransport;
-  server: McpServer;
-}
-
 /** Извлекает id тенанта из пути `/mcp/<id>`; иначе `undefined`. */
 export function parseTenantPath(path: string, knownIds: ReadonlySet<string>): string | undefined {
   if (!path.startsWith(MCP_PATH_PREFIX)) return undefined;
@@ -180,7 +181,6 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
     config.tenants.map((tenant) => [tenant.id, tenant]),
   );
   const contexts = new Map<string, TelegramToolContext>();
-  const sessions = new Map<string, SessionEntry>();
 
   const tenantContext = (tenantId: string): TelegramToolContext => {
     const existing = contexts.get(tenantId);
@@ -195,42 +195,23 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
     return context;
   };
 
-  const dropSession = (sessionId: string): void => {
-    sessions.delete(sessionId);
-  };
-
+  /**
+   * Stateless-обработка: свежие `McpServer` + транспорт на каждый запрос (SDK
+   * запрещает переиспользование stateless-транспорта). Заголовок
+   * `mcp-session-id` игнорируется — сессий нет, рестарт пода не ломает клиентов.
+   * Ресурсы закрываются по завершении ответа (best-effort, без выброса).
+   */
   const handleMcp = async (
     req: IncomingMessage,
     res: ServerResponse,
     tenantId: string,
   ): Promise<void> => {
-    const rawSessionId = req.headers['mcp-session-id'];
-    const sessionId = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId;
-
-    if (sessionId) {
-      const entry = sessions.get(sessionId);
-      // Сессия чужого тенанта не должна обслуживаться этим путём.
-      if (!entry || entry.tenantId !== tenantId) {
-        sendJson(res, 404, {
-          error: { code: 'NOT_FOUND', message: `MCP-сессия не найдена для тенанта «${tenantId}»` },
-        });
-        return;
-      }
-      await entry.transport.handleRequest(req, res);
-      return;
-    }
-
     const server = createMcpServer(tenantContext(tenantId), config.version);
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (id) => {
-        sessions.set(id, { tenantId, transport, server });
-      },
-    });
-    transport.onclose = () => {
-      if (transport.sessionId) dropSession(transport.sessionId);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => {
+      void transport.close().catch(() => {});
       void server.close().catch(() => {});
-    };
+    });
     await server.connect(transport);
     await transport.handleRequest(req, res);
   };

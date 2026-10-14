@@ -265,57 +265,103 @@ describe('HTTP-MCP: health / auth / маршрутизация по тенант
   });
 });
 
-describe('HTTP-MCP: MCP-сессия тенанта', () => {
-  it('initialize отдаёт serverInfo и session id, tools/list — тулы тенанта', async () => {
+describe('HTTP-MCP: stateless-транспорт (MCP-сессий нет)', () => {
+  it('initialize отдаёт serverInfo и не выдаёт session id', async () => {
     const init = await rpc('/mcp/dev', INITIALIZE);
     expect(init.status).toBe(200);
     const info = init.messages.find((message) => message.id === 1)?.result?.serverInfo as {
       name: string;
     };
     expect(info?.name).toBe('synth-gateway-telegram');
-    const sessionId = init.sessionId;
-    expect(sessionId).toBeTruthy();
+    // Stateless: сервер не выдаёт `mcp-session-id`.
+    expect(init.sessionId).toBeNull();
+  });
 
-    const initialized = await rpc(
-      '/mcp/dev',
-      { jsonrpc: '2.0', method: 'notifications/initialized' },
-      { 'mcp-session-id': sessionId! },
-    );
-    expect(initialized.status).toBe(202);
-    expect(initialized.messages).toEqual([]);
+  it('notifications/initialized → 202 без сессии', async () => {
+    const response = await rpc('/mcp/dev', {
+      jsonrpc: '2.0',
+      method: 'notifications/initialized',
+    });
+    expect(response.status).toBe(202);
+    expect(response.messages).toEqual([]);
+  });
 
+  it('tools/list работает без сессии и при повторных запросах (новый транспорт каждый раз)', async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const list = await rpc('/mcp/dev', { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+      expect(list.status).toBe(200);
+      const tools = (list.messages.find((message) => message.id === 2)?.result?.tools ?? []) as {
+        name: string;
+      }[];
+      const names = tools.map((tool) => tool.name);
+      expect(names).toContain('tg_send_to_user');
+      expect(names).toContain('tg_send_message');
+    }
+  });
+
+  it('tools/call работает без сессии и при повторных запросах', async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const call = await rpc('/mcp/dev', {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'tools/call',
+        params: { name: 'tg_status', arguments: { chatId: '777' } },
+      });
+      expect(call.status).toBe(200);
+      const content = call.messages.find((message) => message.id === 5)?.result?.content as
+        | { type: string; text: string }[]
+        | undefined;
+      const status = JSON.parse(content?.[0]?.text ?? '{}') as {
+        chatId: string | null;
+        chatKey: string | null;
+        resolvedFrom: string;
+      };
+      expect(status.chatId).toBe('777');
+      expect(status.chatKey).toBe('chat:telegram:777');
+      expect(status.resolvedFrom).toBe('arg');
+    }
+  });
+
+  it('GET (SSE) в stateless не ломает сервер: стрим открывается, следующий POST работает', async () => {
+    const controller = new AbortController();
+    const stream = await fetch(`${baseUrl}/mcp/dev`, {
+      method: 'GET',
+      headers: { accept: 'text/event-stream', authorization: `Bearer ${TOKEN}` },
+      signal: controller.signal,
+    });
+    expect(stream.status).toBe(200);
+    expect(stream.headers.get('content-type')?.includes('text/event-stream')).toBe(true);
+    // Stateless: session id не выдаётся и на GET.
+    expect(stream.headers.get('mcp-session-id')).toBeNull();
+
+    controller.abort();
+    try {
+      await stream.body?.cancel();
+    } catch {
+      /* поток прерван клиентом — ожидаемо */
+    }
+
+    const list = await rpc('/mcp/dev', { jsonrpc: '2.0', id: 8, method: 'tools/list', params: {} });
+    expect(list.status).toBe(200);
+  });
+
+  it('произвольный (устаревший) mcp-session-id не даёт 404 — регресс на рестарт пода', async () => {
+    const stale = 'stale-session-id-after-gateway-restart';
     const list = await rpc(
       '/mcp/dev',
-      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-      { 'mcp-session-id': sessionId! },
+      { jsonrpc: '2.0', id: 6, method: 'tools/list', params: {} },
+      { 'mcp-session-id': stale },
     );
     expect(list.status).toBe(200);
-    const tools = (list.messages.find((message) => message.id === 2)?.result?.tools ?? []) as {
-      name: string;
-    }[];
-    const names = tools.map((tool) => tool.name);
-    expect(names).toContain('tg_send_to_user');
-    expect(names).toContain('tg_send_message');
-  });
+    expect(list.messages.find((message) => message.id === 6)?.result?.tools).toBeDefined();
 
-  it('сессия одного тенанта не обслуживается по пути другого → 404', async () => {
-    const init = await rpc('/mcp/dev', INITIALIZE);
-    expect(init.sessionId).toBeTruthy();
-    const wrong = await rpc(
+    // Любой session id обслуживается по своему тенанту (чужого 404 больше нет).
+    const other = await rpc(
       '/mcp/test',
-      { jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} },
-      { 'mcp-session-id': init.sessionId! },
+      { jsonrpc: '2.0', id: 7, method: 'tools/list', params: {} },
+      { 'mcp-session-id': stale },
     );
-    expect(wrong.status).toBe(404);
-  });
-
-  it('неизвестный session id → 404', async () => {
-    const response = await rpc(
-      '/mcp/dev',
-      { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} },
-      { 'mcp-session-id': 'nope' },
-    );
-    expect(response.status).toBe(404);
+    expect(other.status).toBe(200);
   });
 });
 
