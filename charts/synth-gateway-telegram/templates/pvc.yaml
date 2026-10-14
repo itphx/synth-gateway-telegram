@@ -7,6 +7,12 @@ metadata:
   name: {{ include "synth-gateway-telegram.fullname" . }}
   labels:
     {{- include "synth-gateway-telegram.labels" . | nindent 4 }}
+  {{- if .Values.persistence.keepOnUninstall }}
+  # Аннотация обязана быть в манифесте релиза: Helm при uninstall фильтрует
+  # ресурсы по манифесту и не видит аннотацию, проставленную вручную на живом PVC.
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
 spec:
   accessModes:
     - ReadWriteOnce

@@ -86,6 +86,11 @@ helm upgrade --install synth-gateway-telegram charts/synth-gateway-telegram \
   недопустим. Переопределяется `--set strategy.type=RollingUpdate` (осознанно).
 - **PVC** (`persistence.enabled=true`) обязателен: без него смещение long-polling
   теряется при рестарте пода.
+- **Сохранение PVC при удалении релиза:** `--set persistence.keepOnUninstall=true` —
+  чарт добавляет в манифест PVC аннотацию `helm.sh/resource-policy: keep`, и
+  `helm uninstall` оставляет claim. Аннотация задаётся именно через values (в
+  манифесте релиза), а не вручную: Helm при удалении фильтрует манифест и
+  проставленную вручную на живом объекте аннотацию не видит. Дефолт — `false`.
 - **Мультитенантность:** `tenants.json` кладётся в Secret ключом `TENANTS_JSON`;
   чарт монтирует его файлом и выставляет `GATEWAY_TENANTS_FILE`
   (`--set tenantsFile.enabled=true`).
