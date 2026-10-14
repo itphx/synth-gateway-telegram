@@ -1,6 +1,9 @@
 name: Release
 
-# Релиз шлюза synth-gateway-telegram: проверки → Docker-образ → Helm-чарт → GitVerse Release.
+# Релиз шлюза synth-gateway-telegram: проверки → Docker-образ → GitVerse Release → Helm-чарт.
+# Публикация Helm-чарта идёт ПОСЛЕ релиза и в мягком режиме (CI_HELM_SOFT=1):
+# GitVerse при падении джобы пропускает зависимые, поэтому публикация чарта не
+# должна блокировать создание релиза (см. комментарий к джобе `helm`).
 #
 # Триггеры:
 #   - push тега vX.Y.Z (или vX.Y.Z-pre): версия берётся из тега;
@@ -108,31 +111,13 @@ jobs:
             --push-retry=3
             --verbosity=info
 
-  # --- Helm-чарт (нативный Helm-реестр GitVerse, не OCI) ---
-  helm:
-    name: Helm-чарт
-    needs: [checks, resolve-version]
-    if: ${{ !inputs.dry_run }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Установка Helm
-        run: |
-          curl -fsSL -o helm.tgz https://get.helm.sh/helm-v3.20.1-linux-amd64.tar.gz
-          tar -xzf helm.tgz
-
-      - name: Lint + упаковка + публикация чарта
-        env:
-          GV_TOKEN: ${{ secrets.GV_TOKEN }}
-          VERSION: ${{ needs.resolve-version.outputs.version }}
-        run: bash scripts/publish-chart.sh
-
   # --- GitVerse Release ---
+  # Намеренно идёт ДО джобы `helm`: GitVerse при падении джобы пропускает
+  # зависимые/последующие, поэтому релиз не должен зависеть от публикации чарта
+  # (в needs намеренно нет `helm`).
   release:
     name: GitVerse Release
-    needs: [docker, helm, resolve-version]
+    needs: [docker, resolve-version]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -152,3 +137,35 @@ jobs:
           title: Release v${{ needs.resolve-version.outputs.version }}
           body: ${{ steps.release_body.outputs.body }}
           pre_release: ${{ inputs.pre_release || false }}
+
+  # --- Helm-чарт (нативный Helm-реестр GitVerse, не OCI) ---
+  # Все шаги идут через scripts/ci-helm.sh (как в основном репозитории synth):
+  # на раннерах GitVerse get.helm.sh недоступен (curl: (28) connect timeout), а
+  # скрипт берёт helm по цепочке HELM_BIN → PATH → кэш → зеркала с проверкой
+  # sha256 → docker-образ. CI_HELM_SOFT=1 — при недоступности Helm шаг печатает
+  # предупреждение и завершается успешно, поэтому публикация чарта не роняет
+  # джобу и не блокирует GitVerse Release. Джоба определения версии здесь не
+  # нужна: скрипт требует версию аргументом, берём её из resolve-version.
+  helm:
+    name: Helm-чарт
+    needs: [checks, resolve-version]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Диагностика источников Helm
+        run: bash scripts/ci-helm.sh sources
+
+      - name: Установка Helm
+        env:
+          CI_HELM_SOFT: '1'
+        run: bash scripts/ci-helm.sh install
+
+      - name: Lint + упаковка + публикация чарта
+        env:
+          CI_HELM_SOFT: '1'
+          GV_TOKEN: ${{ secrets.GV_TOKEN }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: bash scripts/ci-helm.sh publish charts/synth-gateway-telegram "$VERSION"
