@@ -117,6 +117,11 @@ Add-on сам регистрирует свои ресурсы в инстанс
 | **managed** | `--synth-url` + `--token` (env `SYNTH_INSTALL_TOKEN`) | MCP: `POST /mcp/registry` (повтор/409 → `PUT /mcp/registry/:id` либо `PUT /mcp/servers/:name`); skills: `POST /skills` (409 → `PATCH /skills/:name` + `PUT /skills/:name/files/*`); затем `POST /skills/reload` |
 | **standalone** | `--config <config.yaml>` + `--data-dir <dir>` | merge `mcp.servers` в config.yaml (атомарно); копирование каталога скилла в `{dataDir}/skills/<name>/`; при доступном API — `POST /skills/reload` |
 
+Поле `origin` записи реестра инсталлятор **не отправляет** — это серверная деталь
+(AD-071): схема допускает только `instance|user`, и для installer-ключа (service-key)
+инстанс сам помечает запись как `instance`. Клиентское значение с префиксом
+add-on'а дало бы `400 invalid_enum_value`.
+
 Аргументы: `--synth-url`, `--token`, `--tenant`, `--mcp-url` **или**
 `--service-host` (URL MCP собирается как `http://<host>:<provides.mcp.port><path>`),
 `--only mcp,skills` (или флаги `--mcp`/`--skills`), `--skills-dir`, `--mcp-token`

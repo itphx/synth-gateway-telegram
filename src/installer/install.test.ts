@@ -315,6 +315,65 @@ describe('managed-установка MCP', () => {
 describe('managed-установка MCP: headers и enabledByDefault', () => {
   const MCP_TOKEN = 'mcp-bearer-token-1';
 
+  it('create: тело без origin (серверная деталь; схема — instance|user)', async () => {
+    const root = fixtureRoot();
+    const { fetchImpl, calls } = mockFetch({
+      'GET /api/v2/mcp/registry': { status: 200, body: { entries: [] } },
+      'POST /api/v2/mcp/registry': { status: 201, body: {} },
+    });
+    await runInstaller({
+      ...MANAGED,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl,
+      log: () => {},
+    });
+    const body = calls.find((call) => call.method === 'POST')?.body as Record<string, unknown>;
+    expect(body).not.toHaveProperty('origin');
+    expect(Object.keys(body).sort()).toEqual(['config', 'enabled', 'name']);
+  });
+
+  it('update (PUT /mcp/registry/:id и PUT /mcp/servers/:name): тело без origin', async () => {
+    const root = fixtureRoot();
+
+    const byId = mockFetch({
+      'GET /api/v2/mcp/registry': {
+        status: 200,
+        body: { entries: [{ id: 'mcp-1', name: 'synth-gateway-telegram' }] },
+      },
+      'PUT /api/v2/mcp/registry/mcp-1': { status: 200, body: {} },
+    });
+    await runInstaller({
+      ...MANAGED,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl: byId.fetchImpl,
+      log: () => {},
+    });
+    const bodies = (calls: { body?: unknown }[]): Record<string, unknown>[] =>
+      calls.map((call) => call.body).filter((body): body is Record<string, unknown> => Boolean(body));
+    expect(bodies(byId.calls).length).toBeGreaterThan(0);
+    for (const body of bodies(byId.calls)) expect(body).not.toHaveProperty('origin');
+
+    const byName = mockFetch({
+      'GET /api/v2/mcp/registry': { status: 200, body: { entries: [] } },
+      'POST /api/v2/mcp/registry': { status: 409, body: { error: { code: 'CONFLICT' } } },
+      'PUT /api/v2/mcp/servers/synth-gateway-telegram': { status: 200, body: {} },
+    });
+    await runInstaller({
+      ...MANAGED,
+      rootDir: root,
+      mcp: true,
+      skills: false,
+      fetchImpl: byName.fetchImpl,
+      log: () => {},
+    });
+    expect(bodies(byName.calls).length).toBeGreaterThan(0);
+    for (const body of bodies(byName.calls)) expect(body).not.toHaveProperty('origin');
+  });
+
   it('create: заголовок Authorization и enabledByDefault в config записи', async () => {
     const root = fixtureRoot();
     const { fetchImpl, calls } = mockFetch({

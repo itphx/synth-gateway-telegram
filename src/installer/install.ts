@@ -511,11 +511,13 @@ async function installMcpManaged(
     }
   }
 
+  // Поле `origin` НЕ отправляем: это серверная деталь (AD-071) — схема допускает
+  // только `instance|user`, а для installer-ключа инстанс сам проставляет
+  // `instance`. Клиентская передача чужого значения даёт 400 invalid_enum_value.
   const created = await api(client, 'POST', '/mcp/registry', {
     name: mcp.name,
     config,
     enabled: true,
-    origin: `addon:${manifest.name ?? mcp.name}`,
   });
   if (created.status === 200 || created.status === 201) return { action: 'created', url: mcpUrl };
 
