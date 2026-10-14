@@ -28,14 +28,32 @@ description: Уведомления и сообщения в Telegram через
 
 | Тул | Параметры | Назначение |
 |---|---|---|
-| `tg_send_message` | `text`, `chatId?`, `replyToMessageId?` | Отправить сообщение (chatId по умолчанию — `GATEWAY_DEFAULT_CHAT_ID`) |
+| `tg_send_message` | `text`, `chatId?`, `threadId?`, `replyToMessageId?` | Отправить сообщение (чат резолвится автоматически, см. ниже) |
 | `tg_send_to_user` | `text`, `user?` \| `principalId?` \| `chatId?`, `replyToMessageId?` | Сообщение конкретному пользователю Synth: `user` (id/username Synth; резолвится через API v2, нужен scope `users:read`), `principalId` (`tg:<id>`) или `chatId` — напрямую |
 | `tg_edit_message` | `messageId`, `text`, `chatId?` | Изменить текст ранее отправленного сообщения |
 | `tg_delete_message` | `messageId`, `chatId?` | Удалить сообщение |
 | `tg_notify` | `text` | Уведомление владельцу с маркером «🔔» |
-| `tg_send_buttons` | `text`, `buttons: [{ text, data }]`, `chatId?` | Inline-клавиатура: `data` → `callback_data` (≤64 байта) |
+| `tg_send_buttons` | `text`, `buttons: [{ text, data }]`, `chatId?`, `threadId?` | Inline-клавиатура: `data` → `callback_data` (≤64 байта) |
 | `tg_get_me` | — | `getMe` — проверка бота |
-| `tg_status` | `chatId?` | Best-effort привязка чата/сессии из `GATEWAY_DATA_DIR` |
+| `tg_status` | `chatId?` | Привязка чата/сессии из `GATEWAY_DATA_DIR`; из привязанной сессии — привязка этой сессии |
+
+### Как выбирается чат (chatId)
+
+Для `tg_send_message`, `tg_send_buttons`, `tg_edit_message`, `tg_delete_message`,
+`tg_status` целевой чат резолвится по приоритету:
+
+1. **явный `chatId`** в вызове;
+2. **привязка текущей сессии** — если сессия привязана к Telegram-чату, чат
+   подставляется автоматически (ядро Synth передаёт id сессии в `_meta`
+   вызова); вместе с чатом из привязки подставляются `threadId` (топик форума)
+   и `replyToMessageId` (последнее входящее — ответ приходит reply-ем);
+3. **чат по умолчанию** (`GATEWAY_DEFAULT_CHAT_ID` / `secrets/telegram_owner_chat_id`,
+   в мультитенантном режиме — чат с ролью `ADMIN` из `allowlist`, иначе первый).
+
+Если чат не разрешён — тул вернёт ошибку `telegram.chat_id_missing` с
+подсказкой. **id чата показывает `tg_status`** (вызови его в привязанной сессии
+или с явным `chatId`); `tg_status` возвращает поля `sessionId`, `chatId`,
+`resolvedFrom` (`arg`/`session`/`default`/`none`) и `binding`.
 
 ### Кому отправлять (`tg_send_to_user`)
 

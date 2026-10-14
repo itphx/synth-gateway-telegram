@@ -32,6 +32,7 @@ function makeClient(): {
   sendMessage: ReturnType<typeof vi.fn>;
   editMessageText: ReturnType<typeof vi.fn>;
   sendChatAction: ReturnType<typeof vi.fn>;
+  deleteMessage: ReturnType<typeof vi.fn>;
 } {
   let nextId = 100;
   const sendMessage = vi.fn(async (params: Record<string, unknown>) => ({
@@ -52,16 +53,24 @@ function makeClient(): {
     result: true,
     ...params,
   }));
+  const deleteMessage = vi.fn(async (params: Record<string, unknown>) => ({
+    ok: true,
+    dryRun: true,
+    result: true,
+    ...params,
+  }));
   return {
     client: {
       dryRun: true,
       sendMessage,
       editMessageText,
       sendChatAction,
+      deleteMessage,
     } as unknown as TelegramClient,
     sendMessage,
     editMessageText,
     sendChatAction,
+    deleteMessage,
   };
 }
 
@@ -403,6 +412,7 @@ describe('AgentWatcher: стриминг и индикатор «Печатае�
   let sendMessage: ReturnType<typeof vi.fn>;
   let editMessageText: ReturnType<typeof vi.fn>;
   let sendChatAction: ReturnType<typeof vi.fn>;
+  let deleteMessage: ReturnType<typeof vi.fn>;
   let watcher: AgentWatcher;
 
   beforeEach(async () => {
@@ -410,7 +420,7 @@ describe('AgentWatcher: стриминг и индикатор «Печатае�
     dir = await mkdtemp(join(tmpdir(), 'gateway-stream-'));
     store = new GatewayStore(dir);
     await store.init();
-    ({ client, sendMessage, editMessageText, sendChatAction } = makeClient());
+    ({ client, sendMessage, editMessageText, sendChatAction, deleteMessage } = makeClient());
     await store.setChatSession(CHAT_KEY, {
       sessionId: SESSION_ID,
       chatId: '123456789',
@@ -722,6 +732,88 @@ describe('AgentWatcher: стриминг и индикатор «Печатае�
     });
   });
 
+  it('две итерации: промежуточный текст уходит отдельным сообщением', async () => {
+    await chunk({ stream_id: 's1', iteration: 0, content: 'сначала посмотрю' });
+    // Итерация 0 — отдельное live-сообщение.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    // Смена итерации: завершённая фиксируется как промежуточное, для новой
+    // итерации создаётся новое live-сообщение.
+    await chunk({ stream_id: 's1', iteration: 1, content: 'теперь ответ' });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
+  it('при новой итерации предыдущее промежуточное сообщение удаляется', async () => {
+    await chunk({ stream_id: 's1', iteration: 0, content: 'шаг 1' }); // live → 101
+    await chunk({ stream_id: 's1', iteration: 1, content: 'шаг 2' }); // 101 промежуточное, live → 102
+    await chunk({ stream_id: 's1', iteration: 2, content: 'шаг 3' }); // 101 удалено, 102 промежуточное, live → 103
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+    expect(deleteMessage.mock.calls[0]?.[0]).toMatchObject({
+      chatId: '123456789',
+      messageId: 101,
+    });
+  });
+
+  it('после stream.done остаётся финальное сообщение, промежуточное удалено', async () => {
+    await chunk({ stream_id: 's1', iteration: 0, content: 'черновик' }); // live → 101
+    await chunk({ stream_id: 's1', iteration: 1, content: 'финал' }); // 101 промежуточное, live → 102
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'финал', message_index: 1 },
+    });
+    // Промежуточное (101) удалено, live (102) отредактирован финалом.
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+    expect(deleteMessage.mock.calls[0]?.[0]).toMatchObject({ messageId: 101 });
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      messageId: 102,
+      text: 'финал',
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(2); // только два live, без лишних
+  });
+
+  it('одна итерация — промежуточных сообщений нет', async () => {
+    await chunk({ stream_id: 's1', iteration: 0, content: 'ответ' });
+    await watcher.handleEvent({
+      type: 'stream.done',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'ответ', message_index: 1 },
+    });
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      messageId: 101,
+      text: 'ответ',
+    });
+  });
+
+  it('промежуточное сообщение удаляется при stream.cancelled', async () => {
+    await chunk({ stream_id: 's1', iteration: 0, content: 'шаг' });
+    await chunk({ stream_id: 's1', iteration: 1, content: 'часть' });
+    await watcher.handleEvent({
+      type: 'stream.cancelled',
+      sessionId: SESSION_ID,
+      data: { stream_id: 's1', content: 'шаг часть' },
+    });
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+    expect(deleteMessage.mock.calls[0]?.[0]).toMatchObject({ messageId: 101 });
+    expect(editMessageText.mock.calls.at(-1)?.[0]).toMatchObject({
+      messageId: 102,
+      text: 'шаг часть\n\n⏹ Остановлено',
+    });
+  });
+
+  it('ошибка deleteMessage не роняет watcher (best-effort)', async () => {
+    deleteMessage.mockRejectedValueOnce(new Error('boom'));
+    await chunk({ stream_id: 's1', iteration: 0, content: 'шаг 1' });
+    await chunk({ stream_id: 's1', iteration: 1, content: 'шаг 2' });
+    await expect(
+      chunk({ stream_id: 's1', iteration: 2, content: 'шаг 3' }),
+    ).resolves.toBeUndefined();
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+  });
+
   it('при 429 (retry_after) не спамит правками', async () => {
     await chunk({ stream_id: 's1', content: 'a' });
     editMessageText.mockResolvedValueOnce({
@@ -1008,6 +1100,7 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
   let sendMessage: ReturnType<typeof vi.fn>;
   let editMessageText: ReturnType<typeof vi.fn>;
   let sendChatAction: ReturnType<typeof vi.fn>;
+  let deleteMessage: ReturnType<typeof vi.fn>;
   let sendRichMessage: ReturnType<typeof vi.fn>;
   let sendRichMessageDraft: ReturnType<typeof vi.fn>;
   let watcher: AgentWatcher;
@@ -1032,6 +1125,12 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
       result: true,
       ...params,
     }));
+    deleteMessage = vi.fn(async (params: Record<string, unknown>) => ({
+      ok: true,
+      dryRun: true,
+      result: true,
+      ...params,
+    }));
     sendRichMessage = vi.fn(async (params: Record<string, unknown>) => ({
       ok: true,
       dryRun: true,
@@ -1049,6 +1148,7 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
       sendMessage,
       editMessageText,
       sendChatAction,
+      deleteMessage,
       sendRichMessage,
       sendRichMessageDraft,
     } as unknown as TelegramClient;
@@ -1164,6 +1264,29 @@ describe('AgentWatcher: rich-режим (parseMode markdown)', () => {
     // Повторный done (reconnect) — дедуп: второго rich-финала нет.
     await done({ stream_id: 's1', content: '# Заголовок\nтекст!', message_index: 3 });
     expect(sendRichMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('промежуточная итерация — персистентное rich-сообщение, удаляемое на следующей', async () => {
+    await chunk({ stream_id: 's1', iteration: 0, content: '# Шаг 1' });
+    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage).not.toHaveBeenCalled();
+
+    // Смена итерации: текст завершённой уходит персистентным rich-сообщением.
+    await chunk({ stream_id: 's1', iteration: 1, content: '# Шаг 2' });
+    expect(sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage.mock.calls[0]?.[0]).toMatchObject({
+      richMessage: { markdown: '# Шаг 1' },
+    });
+    expect(deleteMessage).not.toHaveBeenCalled();
+
+    // Финал: промежуточное удаляется, финал — новый rich-вызов полным текстом.
+    await done({ stream_id: 's1', content: '# Шаг 2', message_index: 1 });
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+    expect(sendRichMessage).toHaveBeenCalledTimes(2);
+    expect(sendRichMessage.mock.calls[1]?.[0]).toMatchObject({
+      richMessage: { markdown: '# Шаг 2' },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('в группе черновиков нет: только «Печатает…» и финальный sendRichMessage', async () => {

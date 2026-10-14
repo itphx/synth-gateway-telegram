@@ -4,6 +4,7 @@ import { TelegramClient } from '../bot-api/index.js';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import { startMcpHttpServer, DEFAULT_MCP_HTTP_PORT } from './http.js';
 import { runMcpServer } from './server.js';
+import { createSessionChatResolver } from './session-chat.js';
 
 interface ParsedArgs {
   overrides: ConfigOverrides;
@@ -121,12 +122,12 @@ function printHelp(): void {
       '                    [--data-dir DIR] [--chat ID] [--owner ID]',
       '',
       'Инструменты MCP (неймспейс synth-gateway-telegram_*):',
-      '  tg_send_message   { text, chatId?, replyToMessageId? }',
+      '  tg_send_message   { text, chatId?, threadId?, replyToMessageId? }',
       '  tg_send_to_user   { text, user? | principalId? | chatId?, replyToMessageId? }',
       '  tg_edit_message   { messageId, text, chatId? }',
       '  tg_delete_message { messageId, chatId? }',
       '  tg_notify         { text }',
-      '  tg_send_buttons   { text, buttons: [{ text, data }], chatId? }',
+      '  tg_send_buttons   { text, buttons: [{ text, data }], chatId?, threadId? }',
       '  tg_get_me         {}',
       '  tg_status         { chatId? }',
       '',
@@ -222,6 +223,7 @@ async function main(): Promise<void> {
       ...(config.defaultChatId !== undefined ? { defaultChatId: config.defaultChatId } : {}),
       ...(config.ownerChatId !== undefined ? { ownerChatId: config.ownerChatId } : {}),
       dataDir: config.dataDir,
+      resolveSessionChat: createSessionChatResolver(config.dataDir),
     },
     config.version,
   );

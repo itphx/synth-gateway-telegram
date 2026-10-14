@@ -283,6 +283,27 @@ describe('normalizeUpdate: callback_query', () => {
     expect(event?.identity.chatKey).toBe('chat:telegram:123456789');
     expect(event?.payload.callback).toEqual({ data: 'approve', messageId: 30 });
     expect(event?.payload.chatId).toBe('123456789');
+    // Человекочитаемый текст (не JSON-блоб payload): ядро/UI показывают его,
+    // а `callback.data` доходит до модели через `payload.callback`.
+    expect(event?.payload.text).toBe('🔘 Нажата кнопка: approve');
+  });
+
+  it('callback без data: текст без данных кнопки', () => {
+    const event = normalizeUpdate(
+      update({
+        update_id: 23,
+        callback_query: {
+          id: 'cb-4',
+          from: { id: 123456789, is_bot: false, first_name: 'Иван' },
+          message: { message_id: 32, chat: { id: 123456789 } },
+        },
+      }),
+      ctx,
+    );
+
+    expect(event?.type).toBe('callback');
+    expect(event?.payload.text).toBe('🔘 Нажата кнопка');
+    expect(event?.payload.callback).toEqual({ messageId: 32 });
   });
 
   it('callback: chatType из message.chat.type (AD-089 claim-flow)', () => {

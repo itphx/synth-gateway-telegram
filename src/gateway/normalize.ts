@@ -266,6 +266,10 @@ function normalizeCallback(
     ...(chatType ? { chatType } : {}),
     messageId,
     ...(threadId !== undefined ? { threadId } : {}),
+    // Человекочитаемый текст события: ядро (`eventToMessageText`) и UI показывают
+    // `payload.text`, иначе сериализуют весь payload в JSON-блоб. `callback_data`
+    // при этом сохраняется в `payload.callback` (машиночитаемость для модели).
+    text: data ? `🔘 Нажата кнопка: ${data}` : '🔘 Нажата кнопка',
     from: buildFrom(from),
     callback: { ...(data ? { data } : {}), messageId },
   };

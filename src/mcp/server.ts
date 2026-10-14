@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import {
+  sessionIdFromMeta,
   tgDeleteMessage,
   tgEditMessage,
   tgGetMe,
@@ -47,6 +48,7 @@ function fail(error: unknown): ToolResult {
 }
 
 const chatId = z.union([z.string(), z.number()]).optional();
+const threadId = z.number().int().optional();
 
 /**
  * Регистрирует MCP-тулы шлюза (AD-089/AD-046). Имена тулов зафиксированы
@@ -60,17 +62,20 @@ export function createMcpServer(context: TelegramToolContext, version: string): 
     {
       title: 'Отправить сообщение',
       description:
-        'Отправляет сообщение в чат. chatId по умолчанию — GATEWAY_DEFAULT_CHAT_ID ' +
-        '(или secrets/telegram_owner_chat_id). Без токена — dry-run.',
+        'Отправляет сообщение в чат. Целевой чат: явный chatId → привязка текущей ' +
+        'сессии (Telegram-чат подставляется автоматически) → чат по умолчанию ' +
+        '(GATEWAY_DEFAULT_CHAT_ID / secrets/telegram_owner_chat_id либо чат ADMIN из ' +
+        'allowlist). Без токена — dry-run. Если chatId не разрешён — подсказка и тул tg_status.',
       inputSchema: {
         text: z.string(),
         chatId,
+        threadId,
         replyToMessageId: z.number().int().optional(),
       },
     },
-    async (input) => {
+    async (input, extra) => {
       try {
-        return ok(await tgSendMessage(context, input));
+        return ok(await tgSendMessage(context, input, sessionIdFromMeta(extra?._meta)));
       } catch (error) {
         return fail(error);
       }
@@ -84,9 +89,9 @@ export function createMcpServer(context: TelegramToolContext, version: string): 
       description: 'Редактирует текст ранее отправленного сообщения шлюза.',
       inputSchema: { messageId: z.number().int(), text: z.string(), chatId },
     },
-    async (input) => {
+    async (input, extra) => {
       try {
-        return ok(await tgEditMessage(context, input));
+        return ok(await tgEditMessage(context, input, sessionIdFromMeta(extra?._meta)));
       } catch (error) {
         return fail(error);
       }
@@ -100,9 +105,9 @@ export function createMcpServer(context: TelegramToolContext, version: string): 
       description: 'Удаляет сообщение в чате.',
       inputSchema: { messageId: z.number().int(), chatId },
     },
-    async (input) => {
+    async (input, extra) => {
       try {
-        return ok(await tgDeleteMessage(context, input));
+        return ok(await tgDeleteMessage(context, input, sessionIdFromMeta(extra?._meta)));
       } catch (error) {
         return fail(error);
       }
@@ -133,16 +138,18 @@ export function createMcpServer(context: TelegramToolContext, version: string): 
       title: 'Сообщение с inline-кнопками',
       description:
         'Отправляет сообщение с inline-клавиатурой. Каждая кнопка — отдельная строка; ' +
-        '`data` уходит в `callback_data` (до 64 байт).',
+        '`data` уходит в `callback_data` (до 64 байт). Целевой чат резолвится так же, ' +
+        'как у tg_send_message.',
       inputSchema: {
         text: z.string(),
         buttons: z.array(z.object({ text: z.string(), data: z.string() })).min(1),
         chatId,
+        threadId,
       },
     },
-    async (input) => {
+    async (input, extra) => {
       try {
-        return ok(await tgSendButtons(context, input));
+        return ok(await tgSendButtons(context, input, sessionIdFromMeta(extra?._meta)));
       } catch (error) {
         return fail(error);
       }
@@ -196,12 +203,13 @@ export function createMcpServer(context: TelegramToolContext, version: string): 
       title: 'Состояние шлюза',
       description:
         'Best-effort: привязка чата к сессии из хранилища шлюза (GATEWAY_DATA_DIR), ' +
-        'смещение long-polling. Если данных нет — null.',
+        'смещение long-polling. Без chatId, но из привязанной сессии — возвращает ' +
+        'привязку этой сессии (sessionId/chatId/resolvedFrom). Если данных нет — null.',
       inputSchema: { chatId },
     },
-    async (input) => {
+    async (input, extra) => {
       try {
-        return ok(await tgStatus(context, input));
+        return ok(await tgStatus(context, input, sessionIdFromMeta(extra?._meta)));
       } catch (error) {
         return fail(error);
       }

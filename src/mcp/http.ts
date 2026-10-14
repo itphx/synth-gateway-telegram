@@ -29,6 +29,7 @@ import {
   type TenantConfig,
 } from '../gateway/config.js';
 import { createMcpServer } from './server.js';
+import { createSessionChatResolver } from './session-chat.js';
 import type { TelegramToolContext } from './tools.js';
 
 /** Порт HTTP-MCP по умолчанию (следующий после health-сервера шлюза). */
@@ -90,8 +91,23 @@ export function isAuthorized(header: string | undefined, token: string): boolean
 }
 
 /**
+ * Per-tenant дефолтный чат из списка доступа: чат с ролью `ADMIN`, иначе —
+ * первый по порядку ключей. Пустой allowlist → `undefined`.
+ */
+export function defaultChatFromAllowlist(allowlist: Record<string, string>): string | undefined {
+  const entries = Object.entries(allowlist);
+  const admin = entries.find(([, role]) => role.toUpperCase() === 'ADMIN');
+  return (admin ?? entries[0])?.[0];
+}
+
+/**
  * Контекст инструментов тенанта: клиент Bot API (токен/прокси тенанта),
  * per-tenant dataDir и доступ к API v2 Synth для `tg_send_to_user`.
+ *
+ * Дефолтный/owner-чат: глобальный (`defaults`, env/CLI) в приоритете, иначе —
+ * per-tenant дефолт из `allowlist` (чат `ADMIN`, иначе первый). Так в
+ * мультитенантном развёртывании без `GATEWAY_DEFAULT_CHAT_ID` тулы не падают с
+ * `telegram.chat_id_missing`, если задан allowlist.
  */
 export function buildTenantContext(
   config: GatewayConfig,
@@ -106,11 +122,16 @@ export function buildTenantContext(
     dryRun,
     requestTimeoutMs: tenant.requestTimeoutSec * 1000,
   });
+  const dataDir = tenantStoreDir(config.dataDir, tenant.id, legacy);
+  const tenantDefault = defaultChatFromAllowlist(tenant.allowlist);
+  const defaultChatId = defaults.defaultChatId ?? tenantDefault;
+  const ownerChatId = defaults.ownerChatId ?? tenantDefault ?? defaultChatId;
   return {
     client,
-    dataDir: tenantStoreDir(config.dataDir, tenant.id, legacy),
-    ...(defaults.defaultChatId !== undefined ? { defaultChatId: defaults.defaultChatId } : {}),
-    ...(defaults.ownerChatId !== undefined ? { ownerChatId: defaults.ownerChatId } : {}),
+    dataDir,
+    resolveSessionChat: createSessionChatResolver(dataDir),
+    ...(defaultChatId !== undefined ? { defaultChatId } : {}),
+    ...(ownerChatId !== undefined ? { ownerChatId } : {}),
     synth: {
       baseUrl: tenant.synth.baseUrl,
       serviceKey: tenant.synth.serviceKey,

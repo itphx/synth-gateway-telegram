@@ -288,7 +288,8 @@ export async function resolveTelegramChatId(
   if (!user) {
     throw new SynthUserLookupError(
       TELEGRAM_TARGET_REQUIRED,
-      'Укажите получателя: user (id/username Synth), principalId («tg:<id>») или chatId',
+      'Укажите адресата: chatId (Telegram-чат), user (id/username учётной записи Synth) ' +
+        'или principalId («tg:<id>»). Если адресат неизвестен — id чата показывает тул tg_status.',
     );
   }
   if (!opts?.baseUrl?.trim()) {

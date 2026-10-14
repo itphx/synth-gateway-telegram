@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -142,6 +142,74 @@ describe('buildTenantContext: контекст инструментов из т�
     const tenant = { ...config.tenants[0]!, telegram: {} };
     const context = buildTenantContext(config, tenant, false);
     expect(context.client.dryRun).toBe(true);
+  });
+});
+
+describe('buildTenantContext: tenant-дефолт из allowlist', () => {
+  /** Legacy-тенант с заданным allowlist (без tenants.json). */
+  function tenantWithAllowlist(allowlist: string) {
+    const cfg = loadConfig(
+      { GATEWAY_ALLOWLIST: allowlist },
+      { secretsDir, dataDir: join(tenantsDir, 'data-allowlist') },
+    );
+    return { cfg, tenant: cfg.tenants[0]! };
+  }
+
+  it('defaultChatId и ownerChatId = чат ADMIN из allowlist', () => {
+    const { cfg, tenant } = tenantWithAllowlist('111:USER,222:ADMIN');
+    const context = buildTenantContext(cfg, tenant, true);
+    expect(context.defaultChatId).toBe('222');
+    expect(context.ownerChatId).toBe('222');
+  });
+
+  it('без ADMIN — первый по порядку ключей', () => {
+    const { cfg, tenant } = tenantWithAllowlist('111:USER,222:LEAD');
+    expect(buildTenantContext(cfg, tenant, true).defaultChatId).toBe('111');
+  });
+
+  it('глобальный дефолт (env/CLI) приоритетнее tenant-дефолта', () => {
+    const { cfg, tenant } = tenantWithAllowlist('222:ADMIN');
+    const context = buildTenantContext(cfg, tenant, true, { defaultChatId: '9', ownerChatId: '8' });
+    expect(context.defaultChatId).toBe('9');
+    expect(context.ownerChatId).toBe('8');
+  });
+
+  it('пустой allowlist — дефолтов нет', () => {
+    const cfg = loadConfig({}, { secretsDir, dataDir: join(tenantsDir, 'data-empty') });
+    const context = buildTenantContext(cfg, cfg.tenants[0]!, true);
+    expect(context.defaultChatId).toBeUndefined();
+    expect(context.ownerChatId).toBeUndefined();
+  });
+});
+
+describe('buildTenantContext: резолвер привязки сессии (per-tenant)', () => {
+  it('читает state/session-routes.json тенанта', async () => {
+    const dev = config.tenants.find((tenant) => tenant.id === 'dev')!;
+    const context = buildTenantContext(config, dev, false);
+    const dir = context.dataDir!;
+    mkdirSync(join(dir, 'state'), { recursive: true });
+    writeFileSync(
+      join(dir, 'state', 'session-routes.json'),
+      JSON.stringify({
+        sess_dev: {
+          chatKey: 'chat:telegram:777',
+          chatId: '777',
+          threadId: 2,
+          lastInboundMessageId: 5,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      }),
+    );
+
+    expect(context.resolveSessionChat).toBeTypeOf('function');
+    const route = await context.resolveSessionChat!('sess_dev');
+    expect(route).toMatchObject({
+      chatId: '777',
+      chatKey: 'chat:telegram:777',
+      threadId: 2,
+      lastInboundMessageId: 5,
+    });
+    expect(await context.resolveSessionChat!('missing')).toBeUndefined();
   });
 });
 

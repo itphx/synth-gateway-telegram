@@ -83,6 +83,21 @@ interface LiveStream {
   streamId?: string;
   /** id редактируемого live-сообщения Telegram (появляется с первым контентом). */
   messageId?: number;
+  /**
+   * Текущая итерация Tool Use (номер из `stream.chunk.iteration`). Смена номера
+   * означает, что модель завершила одну итерацию (её текст — промежуточное
+   * сообщение) и начала следующую (новое live-сообщение).
+   */
+  iteration?: number;
+  /**
+   * id **промежуточного** сообщения — текста завершённой итерации Tool Use.
+   * При появлении нового промежуточного предыдущее удаляется; на финале
+   * (`stream.done`/`cancelled`/`error`) удаляется, чтобы в чате осталось только
+   * финальное сообщение.
+   */
+  intermediateMessageId?: number;
+  /** Маршрут сессии (чат/тред) — нужен для удаления промежуточного сообщения. */
+  route?: SessionRoute;
   /** Накопленный контент (без reasoning). */
   text: string;
   /** Служебная приписка (например, «↻ повтор 2/3…»). */
@@ -295,9 +310,32 @@ export class AgentWatcher {
    * выставлены), а индикатор не остаётся висеть.
    */
   private resetLiveState(): void {
-    for (const live of this.live.values()) this.clearTyping(live);
+    for (const [sessionId, live] of this.live) {
+      this.clearTyping(live);
+      // Промежуточное сообщение брошенного стрима (обрыв SSE/остановка) —
+      // удаляем best-effort, чтобы оно не осталось в чате.
+      if (live.intermediateMessageId !== undefined) {
+        void this.deleteIntermediateBySession(sessionId, live.intermediateMessageId);
+        live.intermediateMessageId = undefined;
+      }
+    }
     this.live.clear();
     this.clearPendingAdded();
+  }
+
+  /**
+   * Best-effort удаление промежуточного сообщения по сессии: при сбросе
+   * live-состояния маршрут ещё не загружен — резолвим его из store.
+   */
+  private async deleteIntermediateBySession(sessionId: string, messageId: number): Promise<void> {
+    try {
+      const route = await this.store.getSessionRoute(sessionId);
+      if (route) await this.deleteMessageBestEffort(route, messageId);
+    } catch (error) {
+      this.log(
+        `[gateway] watcher: ошибка удаления промежуточного сообщения (${messageId}): ${errorMessage(error)}`,
+      );
+    }
   }
 
   /** Гасит отложенные фоллбек-доставки `message.added` (все сессии). */
@@ -448,9 +486,27 @@ export class AgentWatcher {
   ): Promise<void> {
     const streamId = str(data.stream_id);
     if (streamId !== undefined && this.finalizedStreams.has(streamId)) return;
+    // Новый стрим в той же сессии: у прежнего осталось промежуточное сообщение —
+    // удаляем, чтобы оно не висело в чате.
+    await this.dropReplacedStream(sessionId, streamId);
     const live = this.ensureLive(sessionId, streamId);
+    live.route = route;
     if (live.finalized) return;
     this.startTypingFor(route, live);
+
+    // Смена итерации Tool Use: завершённую фиксируем промежуточным сообщением и
+    // начинаем новое live-сообщение для следующей итерации.
+    const iteration = num(data.iteration);
+    if (iteration !== undefined) {
+      if (live.iteration !== undefined && iteration !== live.iteration) {
+        await this.promoteIntermediate(route, live);
+        live.text = '';
+        live.rendered = undefined;
+        live.note = undefined;
+        live.messageId = undefined;
+      }
+      live.iteration = iteration;
+    }
 
     // `content` — дельта контента; `is_final`-чанк приходит с пустым `content`.
     const delta = str(data.content);
@@ -486,6 +542,8 @@ export class AgentWatcher {
     // Стрим закрылся — отложенный фоллбек `message.added` больше не нужен.
     this.cancelPendingAdded(sessionId);
     const live = this.live.get(sessionId);
+    // Промежуточные сообщения больше не нужны — остаётся только финал.
+    await this.deleteIntermediate(live);
     const streamId =
       str(event.data.stream_id) ?? live?.streamId ?? `${sessionId}:${event.timestamp ?? ''}`;
     const key = `stream:${streamId}`;
@@ -507,6 +565,8 @@ export class AgentWatcher {
     data: Record<string, unknown>,
   ): Promise<void> {
     const live = this.live.get(sessionId);
+    // Промежуточные сообщения больше не нужны — остаётся уведомление об ошибке.
+    await this.deleteIntermediate(live);
     const streamId = str(data.stream_id) ?? live?.streamId ?? `${sessionId}:error`;
     const key = `error:${streamId}`;
     if (await this.store.hasSent(key)) {
@@ -542,6 +602,8 @@ export class AgentWatcher {
     const streamId =
       str(event.data.stream_id) ?? live?.streamId ?? `${sessionId}:${event.timestamp ?? ''}`;
     const content = str(event.data.content) ?? live?.text ?? '';
+    // Промежуточные сообщения больше не нужны — остаётся только финал.
+    await this.deleteIntermediate(live);
     // Нечего доставлять (нет контента и live-сообщения не было) — как раньше,
     // не помечаем stream как отправленный; индикатор гасим.
     if (!content && live?.messageId === undefined) {
@@ -686,7 +748,10 @@ export class AgentWatcher {
 
   /** Стартует индикатор «Печатает…» для сессии (если ещё не запущен). */
   private startTyping(sessionId: string, route: SessionRoute, streamId?: string): void {
+    // Новый стрим в сессии: промежуточное сообщение прежнего удаляем (best-effort).
+    void this.dropReplacedStream(sessionId, streamId);
     const live = this.ensureLive(sessionId, streamId);
+    live.route = route;
     this.startTypingFor(route, live);
   }
 
@@ -756,6 +821,82 @@ export class AgentWatcher {
       this.clearTyping(live);
     }
     this.live.delete(sessionId);
+  }
+
+  /**
+   * При смене `stream_id` в сессии удаляет промежуточное сообщение прежнего
+   * стрима (best-effort), чтобы оно не осталось висеть в чате.
+   */
+  private async dropReplacedStream(
+    sessionId: string,
+    streamId: string | undefined,
+  ): Promise<void> {
+    const previous = this.live.get(sessionId);
+    if (
+      previous &&
+      streamId !== undefined &&
+      previous.streamId !== undefined &&
+      previous.streamId !== streamId
+    ) {
+      await this.deleteIntermediate(previous);
+    }
+  }
+
+  /**
+   * Фиксирует завершённую итерацию Tool Use как промежуточное сообщение: её
+   * live-сообщение (html/plain) либо новый персистентный rich-вызов
+   * (`sendRichMessage`) становится промежуточным, предыдущее промежуточное
+   * удаляется. Итерация без текста промежуточного сообщения не создаёт.
+   */
+  private async promoteIntermediate(route: SessionRoute, live: LiveStream): Promise<void> {
+    if (live.text.trim().length === 0) return;
+    // Предыдущее промежуточное больше не нужно.
+    await this.deleteIntermediate(live);
+    if (this.parseMode === 'markdown' && !live.richFallback) {
+      // Rich live — эфемерный черновик: чтобы текст завершённой итерации остался
+      // в чате, отправляем персистентное rich-сообщение.
+      const sent = await this.sendRichFinal(route, live.text, live.streamId);
+      if (sent.ok) {
+        live.intermediateMessageId = sent.messageId;
+        return;
+      }
+      live.richFallback = true;
+    }
+    // html/plain: live-сообщение уже показывает текст завершённой итерации, оно и
+    // становится промежуточным (для новой итерации создастся новое).
+    if (live.messageId !== undefined) {
+      live.intermediateMessageId = live.messageId;
+      return;
+    }
+    const id = await this.sendText(route, this.renderText(live.text), live.streamId);
+    if (id !== undefined) live.intermediateMessageId = id;
+  }
+
+  /**
+   * Удаляет промежуточное сообщение (текст завершённой итерации). Best-effort:
+   * ошибка Telegram логируется и не роняет watcher.
+   */
+  private async deleteIntermediate(live: LiveStream | undefined): Promise<void> {
+    if (!live || live.intermediateMessageId === undefined) return;
+    const messageId = live.intermediateMessageId;
+    live.intermediateMessageId = undefined;
+    const route = live.route;
+    if (!route) return;
+    await this.deleteMessageBestEffort(route, messageId);
+  }
+
+  /** Best-effort удаление сообщения Telegram (ошибки — в лог, без выброса). */
+  private async deleteMessageBestEffort(route: SessionRoute, messageId: number): Promise<void> {
+    try {
+      const response = await this.client.deleteMessage({ chatId: route.chatId, messageId });
+      if (response.ok === false) {
+        this.log(
+          `[gateway] watcher: Telegram отклонил deleteMessage (${messageId}): ${describeBotError(response)}`,
+        );
+      }
+    } catch (error) {
+      this.log(`[gateway] watcher: ошибка deleteMessage (${messageId}): ${errorMessage(error)}`);
+    }
   }
 
   private markFinalized(streamId: string): void {

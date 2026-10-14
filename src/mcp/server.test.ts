@@ -105,6 +105,57 @@ describe(`MCP-сервер ${SERVER_NAME}`, () => {
     }
   });
 
+  it('tg_send_message берёт chatId/thread/reply из привязки сессии по _meta', async () => {
+    const context: TelegramToolContext = {
+      client: new TelegramClient({ dryRun: true }),
+      defaultChatId: '-1001234567890',
+      resolveSessionChat: async (sessionId) =>
+        sessionId === 'sess_1'
+          ? { chatId: '777', threadId: 3, lastInboundMessageId: 4 }
+          : undefined,
+    };
+    const client = await connect(context);
+    try {
+      const result = await client.callTool({
+        name: 'tg_send_message',
+        arguments: { text: 'привет' },
+        _meta: { 'synth/session_id': 'sess_1' },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        dryRun: true,
+        chat_id: '777',
+        message_thread_id: 3,
+        reply_to_message_id: 4,
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('tg_status по _meta-сессии возвращает привязку этой сессии', async () => {
+    const context: TelegramToolContext = {
+      client: new TelegramClient({ dryRun: true }),
+      dataDir: undefined,
+      resolveSessionChat: async () => ({ chatId: '777', chatKey: 'chat:telegram:777' }),
+    };
+    const client = await connect(context);
+    try {
+      const result = await client.callTool({
+        name: 'tg_status',
+        arguments: {},
+        _meta: { 'synth/session_id': 'sess_meta' },
+      });
+      expect(result.structuredContent).toMatchObject({
+        sessionId: 'sess_meta',
+        chatId: '777',
+        resolvedFrom: 'session',
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it('ошибка инструмента возвращается с isError и кодом', async () => {
     // Контекст без чата по умолчанию → tg_send_message падает с chat_id_missing.
     const client = await connect({ client: new TelegramClient({ dryRun: true }) });

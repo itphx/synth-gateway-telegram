@@ -84,9 +84,12 @@ describe('tg_send_message / tg_edit_message / tg_delete_message (dry-run)', () =
     expect(me.result?.is_bot).toBe(true);
   });
 
-  it('sendMessage без chatId и без значения по умолчанию → ошибка', async () => {
+  it('sendMessage без chatId и без значения по умолчанию → ошибка с подсказкой', async () => {
     const { ctx } = dryRunContext({ defaultChatId: undefined });
-    await expect(tgSendMessage(ctx, { text: 'x' })).rejects.toThrow('telegram.chat_id_missing');
+    await expect(tgSendMessage(ctx, { text: 'x' })).rejects.toMatchObject({
+      code: 'telegram.chat_id_missing',
+    });
+    await expect(tgSendMessage(ctx, { text: 'x' })).rejects.toThrow(/tg_status/);
   });
 });
 
@@ -166,6 +169,93 @@ describe('ошибки Bot API', () => {
     await expect(tgSendMessage(tokenContext(fetchImpl), { text: 'x' })).rejects.toThrow(
       'network down',
     );
+  });
+});
+
+describe('резолв чата по привязке сессии (_meta)', () => {
+  /** Контекст с резолвером привязки: `sess_1` → переданный route. */
+  function sessionContext(route?: {
+    chatId: string;
+    threadId?: number;
+    lastInboundMessageId?: number;
+  }): TelegramToolContext {
+    return dryRunContext({
+      defaultChatId: '-1001234567890',
+      resolveSessionChat: async (sessionId) => (sessionId === 'sess_1' ? route : undefined),
+    }).ctx;
+  }
+
+  it('chatId, message_thread_id и reply_to_message_id берутся из привязки сессии', async () => {
+    const ctx = sessionContext({ chatId: '777', threadId: 12, lastInboundMessageId: 34 });
+    const sent = await tgSendMessage(ctx, { text: 'привет' }, 'sess_1');
+    expect(sent.chat_id).toBe('777');
+    expect(sent.message_thread_id).toBe(12);
+    expect(sent.reply_to_message_id).toBe(34);
+  });
+
+  it('явный chatId приоритетнее привязки; thread/reply — только для чата привязки', async () => {
+    const ctx = sessionContext({ chatId: '777', threadId: 12, lastInboundMessageId: 34 });
+    const sent = await tgSendMessage(ctx, { text: 'x', chatId: '999' }, 'sess_1');
+    expect(sent.chat_id).toBe('999');
+    expect(sent.message_thread_id).toBeUndefined();
+    expect(sent.reply_to_message_id).toBeUndefined();
+  });
+
+  it('явные threadId/replyToMessageId приоритетнее привязки', async () => {
+    const ctx = sessionContext({ chatId: '777', threadId: 12, lastInboundMessageId: 34 });
+    const sent = await tgSendMessage(
+      ctx,
+      { text: 'x', threadId: 55, replyToMessageId: 66 },
+      'sess_1',
+    );
+    expect(sent.message_thread_id).toBe(55);
+    expect(sent.reply_to_message_id).toBe(66);
+  });
+
+  it('без привязки — падает на defaultChatId', async () => {
+    const ctx = sessionContext(undefined);
+    const sent = await tgSendMessage(ctx, { text: 'x' }, 'sess_1');
+    expect(sent.chat_id).toBe('-1001234567890');
+  });
+
+  it('edit/delete используют chatId из привязки сессии', async () => {
+    const ctx = sessionContext({ chatId: '777' });
+    const edited = await tgEditMessage(ctx, { messageId: 1, text: 'x' }, 'sess_1');
+    const deleted = await tgDeleteMessage(ctx, { messageId: 2 }, 'sess_1');
+    expect(edited.chat_id).toBe('777');
+    expect(deleted.chat_id).toBe('777');
+  });
+
+  it('tg_send_buttons подставляет message_thread_id из привязки', async () => {
+    const ctx = sessionContext({ chatId: '777', threadId: 9 });
+    const sent = await tgSendButtons(
+      ctx,
+      { text: 'x', buttons: [{ text: 'a', data: 'a' }] },
+      'sess_1',
+    );
+    expect(sent.chat_id).toBe('777');
+    expect(sent.message_thread_id).toBe(9);
+  });
+
+  it('без sessionId и без дефолта → ошибка chat_id_missing с подсказкой', async () => {
+    const { ctx } = dryRunContext({
+      defaultChatId: undefined,
+      resolveSessionChat: async () => ({ chatId: '777' }),
+    });
+    await expect(tgEditMessage(ctx, { messageId: 1, text: 'x' })).rejects.toMatchObject({
+      code: 'telegram.chat_id_missing',
+    });
+  });
+
+  it('сбой резолвера не ломает отправку (фоллбек на defaultChatId)', async () => {
+    const { ctx } = dryRunContext({
+      defaultChatId: '-1001234567890',
+      resolveSessionChat: async () => {
+        throw new Error('store broken');
+      },
+    });
+    const sent = await tgSendMessage(ctx, { text: 'x' }, 'sess_1');
+    expect(sent.chat_id).toBe('-1001234567890');
   });
 });
 
@@ -256,13 +346,57 @@ describe('tg_status', () => {
     expect(status.binding?.sessionId).toBe('sess_1');
   });
 
-  it('без chatId возвращает все привязки; без хранилища — null', async () => {
+  it('без chatId и без дефолта возвращает все привязки; без хранилища — null', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gateway-mcp-status-'));
     tmpDirs.push(dir);
-    const { ctx } = dryRunContext({ dataDir: dir });
+    const { ctx } = dryRunContext({ dataDir: dir, defaultChatId: undefined });
     const status = await tgStatus(ctx);
     expect(status.offset).toBeNull();
     expect(status.binding).toBeNull();
+    expect(status.resolvedFrom).toBe('none');
     expect(status.chats).toEqual({});
+  });
+
+  it('по _meta-сессии возвращает привязку этой сессии', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gateway-mcp-status-'));
+    tmpDirs.push(dir);
+    mkdirSync(join(dir, 'state'), { recursive: true });
+    writeFileSync(
+      join(dir, 'state', 'chat-sessions.json'),
+      JSON.stringify({
+        'chat:telegram:777': { sessionId: 'sess_meta', chatId: '777' },
+      }),
+    );
+    writeFileSync(join(dir, 'state', 'offset.json'), JSON.stringify({ offset: 5 }));
+
+    const { ctx } = dryRunContext({
+      dataDir: dir,
+      defaultChatId: undefined,
+      resolveSessionChat: async (sessionId) =>
+        sessionId === 'sess_meta' ? { chatId: '777', chatKey: 'chat:telegram:777' } : undefined,
+    });
+    const status = await tgStatus(ctx, {}, 'sess_meta');
+    expect(status.sessionId).toBe('sess_meta');
+    expect(status.chatId).toBe('777');
+    expect(status.chatKey).toBe('chat:telegram:777');
+    expect(status.resolvedFrom).toBe('session');
+    expect(status.binding?.sessionId).toBe('sess_meta');
+    expect(status.chats).toBeUndefined();
+  });
+
+  it('явный chatId имеет приоритет над привязкой сессии', async () => {
+    const { ctx } = dryRunContext({
+      resolveSessionChat: async () => ({ chatId: '777' }),
+    });
+    const status = await tgStatus(ctx, { chatId: '999' }, 'sess_meta');
+    expect(status.chatId).toBe('999');
+    expect(status.resolvedFrom).toBe('arg');
+  });
+
+  it('без сессии падает на defaultChatId', async () => {
+    const { ctx } = dryRunContext({ defaultChatId: '555' });
+    const status = await tgStatus(ctx, {}, 'sess_unknown');
+    expect(status.chatId).toBe('555');
+    expect(status.resolvedFrom).toBe('default');
   });
 });

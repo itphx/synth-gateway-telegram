@@ -29,10 +29,33 @@ export class TelegramMcpError extends Error {
 /** Лимит Telegram на `callback_data` — 64 байта. */
 export const MAX_CALLBACK_DATA_BYTES = 64;
 
+/** Ключ метаданных MCP-запроса с id сессии Synth (`_meta`-контракт ядра). */
+export const SESSION_ID_META_KEY = 'synth/session_id';
+
+/**
+ * Текст ошибки при неразрешённом целевом чате. Согласован с пользователем:
+ * подсказывает явный `chatId`, авто-подстановку в привязанной сессии и `tg_status`.
+ */
+export const CHAT_ID_MISSING_MESSAGE =
+  'Не задан chatId: укажите параметр chatId явно; в сессии, привязанной к Telegram-чату, ' +
+  'он подставляется автоматически; id чата можно узнать тулом tg_status.';
+
 /** Кнопка inline-клавиатуры: `data` уходит в `callback_data`. */
 export interface InlineButtonInput {
   text: string;
   data: string;
+}
+
+/** Привязка чата к сессии (срез `GatewayStore.SessionRoute`) для резолва из `_meta`. */
+export interface SessionChat {
+  /** Chat id Telegram. */
+  chatId: string;
+  /** Ключ чата в хранилище (`chat:telegram:<chatId>`). */
+  chatKey?: string;
+  /** id топика форума (если чат — форум). */
+  threadId?: number;
+  /** id последнего входящего сообщения (для reply-адресата). */
+  lastInboundMessageId?: number;
 }
 
 /** Контекст выполнения инструментов: клиент и настройки. */
@@ -45,11 +68,97 @@ export interface TelegramToolContext {
   /** Каталог JSON-хранилища шлюза (для `tg_status`; может отсутствовать). */
   dataDir?: string;
   /**
+   * Резолвер привязки чата по id сессии Synth (`_meta['synth/session_id']`).
+   * Реализуется транспортом (HTTP — per-tenant `tenantStoreDir`, stdio —
+   * `config.dataDir`); стор инстанцируется лениво. Не задан — резолв по сессии
+   * недоступен (работает явный `chatId`/`defaultChatId`).
+   */
+  resolveSessionChat?: (sessionId: string) => Promise<SessionChat | undefined>;
+  /**
    * Доступ к API v2 Synth (нужен `tg_send_to_user` для резолвинга `user` →
    * Telegram-идентичность). Не задан — резолвинг по `user` недоступен
    * (работают `principalId`/`chatId`).
    */
   synth?: SynthUserLookupOptions;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Извлекает id сессии Synth из `_meta` MCP-запроса (контракт `synth/session_id`).
+ * Это метаданные запроса, а не `extra.sessionId` MCP-транспорта.
+ */
+export function sessionIdFromMeta(meta: unknown): string | undefined {
+  if (!isRecord(meta)) return undefined;
+  const value = meta[SESSION_ID_META_KEY];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/** Откуда взят целевой `chatId`. */
+export type ChatIdSource = 'arg' | 'session' | 'default';
+
+interface ResolvedChat {
+  chatId: string | number;
+  resolvedFrom: ChatIdSource;
+  /** Привязка сессии (если `_meta`-сессия резолвилась). */
+  route?: SessionChat;
+}
+
+/** Непустое значение chatId (`undefined`/`null`/пустая строка — нет значения). */
+function isSetChatId(value: string | number | undefined | null): value is string | number {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+/** Совпадает ли целевой `chatId` с чатом привязки сессии. */
+function sameChat(chatId: string | number, route: SessionChat): boolean {
+  return String(chatId) === route.chatId;
+}
+
+/**
+ * Резолвит целевой чат по приоритету: явный аргумент → привязка сессии
+ * (`_meta`) → `ctx.defaultChatId` (в HTTP-режиме — tenant-дефолт из allowlist).
+ * Неразрешённый чат → {@link TelegramMcpError} `telegram.chat_id_missing`.
+ */
+async function resolveChatId(
+  ctx: TelegramToolContext,
+  explicit: string | number | undefined,
+  sessionId: string | undefined,
+): Promise<ResolvedChat> {
+  // Привязку сессии читаем всегда (нужна для threadId/reply), но ошибку стора
+  // не пробрасываем наружу: транспортный сбой не должен ломать отправку.
+  let route: SessionChat | undefined;
+  if (sessionId && ctx.resolveSessionChat) {
+    try {
+      route = await ctx.resolveSessionChat(sessionId);
+    } catch {
+      route = undefined;
+    }
+  }
+
+  if (isSetChatId(explicit)) {
+    return { chatId: explicit, resolvedFrom: 'arg', ...(route ? { route } : {}) };
+  }
+  if (route?.chatId) {
+    return { chatId: route.chatId, resolvedFrom: 'session', route };
+  }
+  if (isSetChatId(ctx.defaultChatId)) {
+    return { chatId: ctx.defaultChatId, resolvedFrom: 'default' };
+  }
+  throw new TelegramMcpError('telegram.chat_id_missing', CHAT_ID_MISSING_MESSAGE);
+}
+
+/** `messageThreadId` из привязки сессии — только если целевой чат ей совпадает. */
+function threadIdFromRoute(target: ResolvedChat): number | undefined {
+  if (!target.route || target.route.threadId === undefined) return undefined;
+  return sameChat(target.chatId, target.route) ? target.route.threadId : undefined;
+}
+
+/** `replyToMessageId` из привязки сессии — только если целевой чат ей совпадает. */
+function replyToFromRoute(target: ResolvedChat): number | undefined {
+  if (!target.route || target.route.lastInboundMessageId === undefined) return undefined;
+  return sameChat(target.chatId, target.route) ? target.route.lastInboundMessageId : undefined;
 }
 
 function validateCallbackData(data: string): void {
@@ -81,12 +190,23 @@ export function buildInlineKeyboard(buttons: InlineButtonInput[]): InlineKeyboar
 /** `tg_send_message`: отправить сообщение в чат. */
 export async function tgSendMessage(
   ctx: TelegramToolContext,
-  input: { text: string; chatId?: string | number; replyToMessageId?: number },
+  input: {
+    text: string;
+    chatId?: string | number;
+    /** id топика форума (`message_thread_id`); иначе — из привязки сессии. */
+    threadId?: number;
+    replyToMessageId?: number;
+  },
+  sessionId?: string,
 ): Promise<BotApiResponse> {
+  const target = await resolveChatId(ctx, input.chatId, sessionId);
+  const threadId = input.threadId ?? threadIdFromRoute(target);
+  const replyToMessageId = input.replyToMessageId ?? replyToFromRoute(target);
   return ctx.client.sendMessage({
-    chatId: input.chatId ?? ctx.defaultChatId,
+    chatId: target.chatId,
     text: input.text,
-    ...(input.replyToMessageId !== undefined ? { replyToMessageId: input.replyToMessageId } : {}),
+    ...(threadId !== undefined ? { messageThreadId: threadId } : {}),
+    ...(replyToMessageId !== undefined ? { replyToMessageId } : {}),
   });
 }
 
@@ -94,9 +214,11 @@ export async function tgSendMessage(
 export async function tgEditMessage(
   ctx: TelegramToolContext,
   input: { messageId: number; text: string; chatId?: string | number },
+  sessionId?: string,
 ): Promise<BotApiResponse> {
+  const target = await resolveChatId(ctx, input.chatId, sessionId);
   return ctx.client.editMessageText({
-    chatId: input.chatId ?? ctx.defaultChatId,
+    chatId: target.chatId,
     messageId: input.messageId,
     text: input.text,
   });
@@ -106,9 +228,11 @@ export async function tgEditMessage(
 export async function tgDeleteMessage(
   ctx: TelegramToolContext,
   input: { messageId: number; chatId?: string | number },
+  sessionId?: string,
 ): Promise<BotApiResponse> {
+  const target = await resolveChatId(ctx, input.chatId, sessionId);
   return ctx.client.deleteMessage({
-    chatId: input.chatId ?? ctx.defaultChatId,
+    chatId: target.chatId,
     messageId: input.messageId,
   });
 }
@@ -131,12 +255,22 @@ export async function tgNotify(
 /** `tg_send_buttons`: сообщение с inline-клавиатурой. */
 export async function tgSendButtons(
   ctx: TelegramToolContext,
-  input: { text: string; buttons: InlineButtonInput[]; chatId?: string | number },
+  input: {
+    text: string;
+    buttons: InlineButtonInput[];
+    chatId?: string | number;
+    /** id топика форума (`message_thread_id`); иначе — из привязки сессии. */
+    threadId?: number;
+  },
+  sessionId?: string,
 ): Promise<BotApiResponse> {
+  const target = await resolveChatId(ctx, input.chatId, sessionId);
+  const threadId = input.threadId ?? threadIdFromRoute(target);
   return ctx.client.sendMessage({
-    chatId: input.chatId ?? ctx.defaultChatId,
+    chatId: target.chatId,
     text: input.text,
     replyMarkup: buildInlineKeyboard(input.buttons),
+    ...(threadId !== undefined ? { messageThreadId: threadId } : {}),
   });
 }
 
@@ -203,11 +337,15 @@ export interface StatusResult {
   dryRun: boolean;
   /** Смещение long-polling шлюза (если хранилище доступно). */
   offset: number | null;
+  /** id сессии Synth из `_meta` (если вызов пришёл из сессии). */
+  sessionId?: string;
   chatId: string | null;
   chatKey: string | null;
+  /** Откуда взят `chatId`: аргумент/сессия/дефолт/не разрешён. */
+  resolvedFrom: 'arg' | 'session' | 'default' | 'none';
   /** Привязка запрошенного чата (или `null`). */
   binding: ChatBinding | null;
-  /** Все привязки, если `chatId` не задан. */
+  /** Все привязки, если чат не задан и не разрешён. */
   chats?: Record<string, ChatBinding>;
 }
 
@@ -237,22 +375,54 @@ function readOffset(dataDir: string): number | null {
 
 /**
  * `tg_status`: best-effort состояние — привязка чата/сессии из хранилища шлюза
- * (`GATEWAY_DATA_DIR`). Если хранилище недоступно — значения `null`.
+ * (`GATEWAY_DATA_DIR`). Целевой чат разрешается по приоритету: явный `chatId` →
+ * привязка сессии (`_meta['synth/session_id']`) → `ctx.defaultChatId`. Если чат не
+ * разрешён — возвращаются все привязки. Хранилище недоступно — значения `null`.
  */
 export async function tgStatus(
   ctx: TelegramToolContext,
   input: { chatId?: string | number } = {},
+  sessionId?: string,
 ): Promise<StatusResult> {
   const chats = ctx.dataDir ? readChatSessions(ctx.dataDir) : {};
   const offset = ctx.dataDir ? readOffset(ctx.dataDir) : null;
-  const chatId = input.chatId !== undefined ? String(input.chatId) : null;
-  const chatKey = chatId !== null ? `chat:telegram:${chatId}` : null;
+
+  let chatId: string | null = null;
+  let chatKey: string | null = null;
+  let resolvedFrom: StatusResult['resolvedFrom'] = 'none';
+
+  if (isSetChatId(input.chatId)) {
+    chatId = String(input.chatId);
+    chatKey = `chat:telegram:${chatId}`;
+    resolvedFrom = 'arg';
+  } else {
+    // Сбой стора не должен ломать статус — трактуем как «привязки нет».
+    let route: SessionChat | undefined;
+    if (sessionId && ctx.resolveSessionChat) {
+      try {
+        route = await ctx.resolveSessionChat(sessionId);
+      } catch {
+        route = undefined;
+      }
+    }
+    if (route?.chatId) {
+      chatId = route.chatId;
+      chatKey = route.chatKey ?? `chat:telegram:${route.chatId}`;
+      resolvedFrom = 'session';
+    } else if (isSetChatId(ctx.defaultChatId)) {
+      chatId = String(ctx.defaultChatId);
+      chatKey = `chat:telegram:${chatId}`;
+      resolvedFrom = 'default';
+    }
+  }
 
   return {
     dryRun: ctx.client.dryRun,
     offset,
+    ...(sessionId ? { sessionId } : {}),
     chatId,
     chatKey,
+    resolvedFrom,
     binding: chatKey !== null ? (chats[chatKey] ?? null) : null,
     ...(chatKey === null ? { chats } : {}),
   };
