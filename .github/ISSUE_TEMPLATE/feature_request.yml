@@ -1,0 +1,47 @@
+name: Feature request
+description: Suggest an idea or enhancement for the Synth Telegram gateway
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the Synth Telegram gateway!
+        Please describe your idea below.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this feature solve? Why is it useful?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe what you would like to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative solutions or workarounds you have thought about.
+    validations:
+      required: false
+  - type: input
+    id: synth-version
+    attributes:
+      label: Synth version
+      description: Version of the Synth core you are targeting (optional).
+      placeholder: "0.9.0"
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched for existing issues and this is not a duplicate.
+          required: true

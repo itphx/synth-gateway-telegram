@@ -1,0 +1,17 @@
+# Единый перевод строк (LF) во всех текстовых файлах; нормализация при checkout.
+* text=auto eol=lf
+
+# Бинарные файлы — git не пытается нормализовать перевод строк.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+
+# Сгенерированные файлы — не показывать в diff и пометить для GitHub linguist.
+pnpm-lock.yaml -diff linguist-generated
+dist/** linguist-generated

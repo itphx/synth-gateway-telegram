@@ -1,0 +1,30 @@
+# Категории для авто-генерируемых релиз-нотов GitHub.
+changelog:
+  categories:
+    - title: Features
+      labels:
+        - feat
+    - title: Bug Fixes
+      labels:
+        - fix
+    - title: Documentation
+      labels:
+        - docs
+    - title: Refactoring
+      labels:
+        - refactor
+    - title: Tests
+      labels:
+        - test
+    - title: CI
+      labels:
+        - ci
+    - title: Chores
+      labels:
+        - chore
+    - title: Other Changes
+      labels:
+        - "*"
+  exclude:
+    labels:
+      - skip-changelog
