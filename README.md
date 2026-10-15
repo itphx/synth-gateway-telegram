@@ -1,5 +1,7 @@
 # synth-gateway-telegram
 
+> 🌐 [English](./README.en.md) · **Русский**
+
 **Telegram-шлюз** — внешний сервис-мост (**Gateway**) агентной платформы
 [Synth](https://gitverse.ru/itphx/synth): мост между Telegram-ботом и платформой
 внешних событий (AD-089). Шлюз принимает апдейты бота (long-polling), нормализует

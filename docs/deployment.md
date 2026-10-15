@@ -1,5 +1,7 @@
 # Развёртывание Telegram-шлюза
 
+> 🌐 [English](./en/deployment.md) · **Русский**
+
 > Docker, docker compose, Kubernetes и Helm для шлюза `synth-gateway-telegram`.
 > Переменные и секреты — [configuration.md](configuration.md); границы шлюза —
 > [gateway.md](gateway.md).

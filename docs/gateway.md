@@ -1,5 +1,7 @@
 # Gateway Synth: границы и основания
 
+> 🌐 [English](./en/gateway.md) · **Русский**
+
 > Краткая выжимка. Полные архитектурные решения — в основном репозитории Synth:
 > <https://gitverse.ru/itphx/synth> — AD-087 «Шлюзы», AD-089
 > (внешние события), AD-090 (Plugin ≠ Gateway ≠ Add-on ≠ Declarative),
